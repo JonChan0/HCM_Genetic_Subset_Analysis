@@ -1,0 +1,403 @@
+---
+title: "Comparison of HCMR Case Rare-Variant Carriers on Endophenotype "
+author: "Jonathan Chan"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide   
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(viridis)
+library(factoextra)
+library(tictoc)
+library(readxl)
+
+rm(list=ls())
+
+theme_set(theme_classic(base_size=14))
+
+source('genetic_subset_analysis/common/hcmr_endophenotype_functions.R')
+```
+
+## Import
+
+```{r import, echo=F}
+#Import in the total_df_notransform from EDA_HCMR.Rmd
+hcmr_ids_of_interest <- read_tsv('genetic_subset_analysis/common/output/data/hcmr_agesex_rare_filtered_2558.tsv')
+hcmr_tb <- readRDS('output/data/total_notransform_nogenofilter_df.rds') %>% #I use the 2750 -> filtered for those who have HCR IDs (2677) (i.e. without filtering for hard-called genotypes)
+  distinct()
+
+hcmr_tb <- hcmr_tb %>%
+  filter(HCR_IDs %in% hcmr_ids_of_interest$HCR_IDs) #Now filter to those individuals of interest
+
+falsepositive_mybpc3_vus_individuals <- readRDS('genetic_subset_analysis/common/falsepositive_mybpc3_vus_individuals.rds')
+hcmr_tb <- hcmr_tb %>%
+  mutate(sarcomere = ifelse(HCR_IDs %in% falsepositive_mybpc3_vus_individuals , FALSE, sarcomere)) #MYBPC3-VUS individuals incorrectly classified as sarcomere-positive
+
+rm(hcmr_ids_of_interest)
+```
+
+## Phenotypes for Comparison
+
+The following phenotypes will be analysed each reflecting some component of HCM disease.
+
+- Hypertrophy: wallthkmax; lvmassi
+- Fibrosis: lge_total; ecvfwhole
+- Hypercontractility: LVEF (from CMR) and LV strain parameters (lvs_ellmean; eccmean; errmean)
+
+Note that lge_total is treated both as a continuous and a discrete trait via binning.
+
+```{r phenotype_tb}
+phenos_of_interest <- c('lge_total','wallthkmax','lvmassi','lge_total','ecvfwhole','lvef','lvs_ellmean','lvs_eccmean','lvs_errmean')
+contphenos <- phenos_of_interest
+
+continuous_param_list <- list(
+  c('wallthkmax','Maximal LV Wall Thickness (mm)'),
+  c('lvmassi','LV Mass Index (g/m2)'),
+  c('lge_total','LGE Mass over All Segments / LV Mass (%)'),
+  c('ecvfwhole','Whole LV Extracellular Volume Fraction (%)'),
+  c('lvef','LV Ejection Fraction (%)'),
+  c('lvs_ellmean','-Longitudinal LV Strain'),
+  c('lvs_eccmean','-Circumferential LV Strain'),
+  c('lvs_errmean','Radial LV Strain')
+  # c('entropy_LVWall_MAG_adj','Entropy of LV Wall from MAG LGE Images'),
+  # c('entropy_LVWall_PSIR_adj','Entropy of LV Wall from PSIR LGE Images')
+)
+names(continuous_param_list) <- map_chr(continuous_param_list, ~.[[1]])
+
+label_tb <- read_tsv('output/data/combo_labels_20260123.tsv')
+```
+
+```{r phenotype_tb}
+
+print(str_glue('Filtering out {nrow(hcmr_tb) - nrow(hcmr_tb %>% filter(sarcomere==T))} sarcomere-negative individuals from HCMR cohort for analysis.'))
+
+hcmr_sarcpos_tb <- hcmr_tb %>%
+  filter(sarcomere==T) #Filter to only sarcomere-positive individuals
+```
+
+### Phenotype Tibble Builder
+
+This builds a single overall phenotype tibble with either their 
+
+1. Primary rare variant classification (per-gene)
+2. Secondary rare variant classification (P/LP vs. VUS etc.)
+
+```{r}
+pergene_rarevar_classification <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class.tsv')
+pergene_perpatho_rarevar_classification <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class_plp_vusfpvus.tsv')
+```
+
+```{r}
+#Build the phenotype tibble, combining the two rare variant classifications into the same tibble
+hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>%
+  left_join(select(pergene_rarevar_classification,HCR_ID, class_primary=class), by=c('HCR_IDs'='HCR_ID')) %>%
+  left_join(select(pergene_perpatho_rarevar_classification,HCR_ID, class_secondary=class), by=c('HCR_IDs'='HCR_ID'))
+
+#Some phenotype-specific preprocessing
+hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>%
+    mutate(lge_total_bin = case_when(lge_total==0 ~ '0%',
+                                     lge_total >0 & lge_total <=5 ~ '0-5%',
+                                     lge_total > 5 & lge_total <=10 ~ '5-10%',
+                                     lge_total > 10 & lge_total <= 15 ~ '10-15%',
+                                     lge_total > 15 ~ '>15%',
+                                     T~NA)) %>%
+    mutate(lge_total_bin = factor(lge_total_bin, levels=c('0%','0-5%','5-10%','10-15%','>15%'), ordered=T)) %>%
+    mutate(ecvfwhole=ecvfwhole * 100) 
+
+#Output the hcmr_sarcpos-tb with 915 individuals with primary and secondary class attached and with no transformation and without filtering for the NA values in the endophenotypes of interest
+hcmr_sarcpos_tb_noNAfiltered <- hcmr_sarcpos_tb 
+write_tsv(hcmr_sarcpos_tb_noNAfiltered, 'genetic_subset_analysis/RareVar/3_output/data/hcmr_sarcpos_pheno_rarevarclasses_noNAfiltered_notransform.tsv')
+```
+
+```{r}
+covs <- c('bmi','sarcomere','FieldStrength')
+
+#Build the initial tb for all sarc_positive individuals = 915
+hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>%
+  select(HCR_IDs,age,sex=gender,bsa, all_of(covs), class_primary, class_secondary,
+         all_of(phenos_of_interest))
+
+hcmr_sarcpos_tb_noNAfiltered <- hcmr_sarcpos_tb_noNAfiltered %>%
+  select(HCR_IDs,age,sex=gender,bsa, all_of(covs), class_primary, class_secondary,
+         all_of(phenos_of_interest))
+
+#Only apply this filtering step to the hcmr_sarcpos_tb
+hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>% 
+  filter(if_all(c(covs), negate(is.na))) %>%
+  filter(if_any(c(contphenos), negate(is.na))) #Filter out all individuals who have NA values for all 6 continuous phenotypes or covariates = 915-879 = 36 individuals removed
+```
+
+This creates variations of the phenotype tibble for downstream analyses.
+
+```{r}
+hcmr_sarcpos_tb_notransform <- hcmr_sarcpos_tb #Non-transformed version of the tibble (but has been filtered for non-NA individuals i.e. 879) 
+
+hcmr_sarcpos_tb_notransform_lgelogged <- hcmr_sarcpos_tb_notransform %>%
+  mutate(lge_total = log1p(lge_total)) #Log-transform LGE to correct for skewness (add a small constant to avoid log(0))
+
+#Log-transform the skewed LGE and also scale into SD
+scaled_cols <- c('lge_total')
+hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>%
+  mutate(across(scaled_cols, ~log1p(.))) %>% #Log-transform LGE to correct for skewness (add a small constant to avoid log(0))
+  mutate(across(contphenos, ~scale(.)[,1])) # Standard scaling of all endophenotypes
+
+write_tsv(hcmr_sarcpos_tb_notransform, 'genetic_subset_analysis/RareVar/3_output/data/hcmr_sarcpos_pheno_rarevarclasses_notransform.tsv')
+write_tsv(hcmr_sarcpos_tb_notransform_lgelogged, 'genetic_subset_analysis/RareVar/3_output/data/hcmr_sarcpos_pheno_rarevarclasses_notransform_lgelogged.tsv')
+write_tsv(hcmr_sarcpos_tb, 'genetic_subset_analysis/RareVar/3_output/data/hcmr_sarcpos_pheno_rarevarclasses_transform.tsv')
+rm(hcmr_tb)
+```
+
+### Comparison Group Generator
+
+These generate the comparison_tbs for each comparison - either transformed or non-transformed and all for single-dosage individuals.
+
+```{r}
+#This code generates the comparison lists
+#For primary classification comparisons
+#For thick vs. thin (excluding ACTC1 from Thin btw)
+thick_class <- unique(hcmr_sarcpos_tb$class_primary)[!str_detect(unique(hcmr_sarcpos_tb$class_primary),'ACTC1|TPM1|TNNI3|TNNT2') & str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3|MYH7|MYL2|MYL3')]
+thin_class <- unique(hcmr_sarcpos_tb$class_primary)[str_detect(unique(hcmr_sarcpos_tb$class_primary),'TPM1|TNNI3|TNNT2') & !str_detect(unique(hcmr_sarcpos_tb$class_primary),'ACTC1|MYBPC3|MYH7|MYL2|MYL3')]
+
+#For mybpc3_pLOF vs. mybpc3_nonlof
+mybpc3_plof_class <- unique(hcmr_sarcpos_tb$class_primary)[str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3_pLOF') & !str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3_nonLOF')]
+mybpc3_nonlof_class <- unique(hcmr_sarcpos_tb$class_primary)[str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3_nonLOF') & !str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3_pLOF')]
+
+#For mybpc3 vs. MYH7
+mybpc3_class <- unique(hcmr_sarcpos_tb$class_primary)[str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3') & !str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYH7')]
+myh7_class <- unique(hcmr_sarcpos_tb$class_primary)[str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYH7') & !str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3')]
+
+#For secondary classification comparison
+#For P/LP vs. VUS_VUS_FP
+p_lp_class <- unique(hcmr_sarcpos_tb$class_secondary)[str_detect(unique(hcmr_sarcpos_tb$class_secondary),'P_LP') & !str_detect(unique(hcmr_sarcpos_tb$class_secondary), 'VUS')] #I use this because I wish to exclude all the individuals who have a combination across P_LP and VUS_VUS_FP
+vus_vusfp_class <- unique(hcmr_sarcpos_tb$class_secondary)[str_detect(unique(hcmr_sarcpos_tb$class_secondary),'VUS') & !str_detect(unique(hcmr_sarcpos_tb$class_secondary), 'P_LP')] 
+
+#---------------------------------------------------------------------------------------
+#Parameter lists for each comparison
+thick_thin_param_list <- list(thick_class, 'Thick',thin_class, 'Thin')
+mybpc3_plof_nonlof_param_list <- list(mybpc3_plof_class, 'MYBPC3_pLOF', mybpc3_nonlof_class, 'MYBPC3_nonLOF')
+mybpc3_myh7_param_list <- list(mybpc3_class, 'MYBPC3',myh7_class,'MYH7')
+p_lp_vus_vusfp_param_list <- list(p_lp_class, 'P/LP', vus_vusfp_class, 'VUS')
+
+rm(list=ls(pattern='class$'))
+```
+
+```{r}
+#These are with the transformed phenotype_tb
+temp <- map(list(thick_thin_param_list,mybpc3_plof_nonlof_param_list,mybpc3_myh7_param_list),~comparison_pheno_tb_gen(phenotype_tb = hcmr_sarcpos_tb, param_list=.,rarevar_class_tb = pergene_rarevar_classification, var_class='primary'))
+names(temp) <- c('thick_thin_tb','mybpc3_plof_nonlof_tb','mybc3_myh7_tb')
+
+temp2 <- map(list(p_lp_vus_vusfp_param_list),~comparison_pheno_tb_gen(phenotype_tb = hcmr_sarcpos_tb, param_list=.,rarevar_class_tb = pergene_perpatho_rarevar_classification, var_class='secondary'))
+names(temp2) <- c('p_lp_vus_vusfp_tb')
+
+comparison_tbs <- c(temp, temp2)
+write_rds(comparison_tbs, 'genetic_subset_analysis/RareVar/3_output/data/hcmr_comparison_tbs.rds')
+rm(temp, temp2)
+
+
+#These are with the nontransformed phenotype_tb (but without logged LGE)
+temp <- map(list(thick_thin_param_list,mybpc3_plof_nonlof_param_list,mybpc3_myh7_param_list),~comparison_pheno_tb_gen(phenotype_tb = hcmr_sarcpos_tb_notransform, param_list=.,rarevar_class_tb = pergene_rarevar_classification, var_class='primary'))
+names(temp) <- c('thick_thin_tb','mybpc3_plof_nonlof_tb','mybc3_myh7_tb')
+
+temp2<- map(list(p_lp_vus_vusfp_param_list),~comparison_pheno_tb_gen(phenotype_tb = hcmr_sarcpos_tb_notransform, param_list=.,rarevar_class_tb = pergene_perpatho_rarevar_classification, var_class='secondary'))
+names(temp2) <- c('p_lp_vus_vusfp_tb')
+
+comparison_tbs_notransform <- c(temp, temp2)
+write_rds(comparison_tbs_notransform, 'genetic_subset_analysis/RareVar/3_output/data/hcmr_comparison_tbs_notransform.rds')
+rm(temp, temp2)
+
+
+#These are with the nontransformed phenotype_tb without filtering out the individuals with NA values for the continuous endophenotypes (but without LOG of LGE)
+temp <- map(list(thick_thin_param_list,mybpc3_plof_nonlof_param_list,mybpc3_myh7_param_list),~comparison_pheno_tb_gen(phenotype_tb = hcmr_sarcpos_tb_noNAfiltered, param_list=.,rarevar_class_tb = pergene_rarevar_classification, var_class='primary'))
+names(temp) <- c('thick_thin_tb','mybpc3_plof_nonlof_tb','mybc3_myh7_tb')
+
+temp2<- map(list(p_lp_vus_vusfp_param_list),~comparison_pheno_tb_gen(phenotype_tb = hcmr_sarcpos_tb_noNAfiltered, param_list=.,rarevar_class_tb = pergene_perpatho_rarevar_classification, var_class='secondary'))
+names(temp2) <- c('p_lp_vus_vusfp_tb')
+
+comparison_tbs_noNAfiltered <- c(temp, temp2)
+write_rds(comparison_tbs_noNAfiltered, 'genetic_subset_analysis/RareVar/3_output/data/hcmr_comparison_tbs_noNAfiltered.rds')
+rm(temp, temp2)
+
+rm(thick_thin_param_list,mybpc3_myh7_param_list,mybpc3_plof_nonlof_param_list, p_lp_vus_vusfp_param_list)
+```
+
+## Linear/Logistic Regression Modelling
+
+I also fit linear/logistic regression models for the continuous/discrete traits to correct for confounding effects such as age, sex, BMI and BSA (where necessary e.g. fro maxLVWT).
+
+```{r linlogreg}
+lm_results_list <- list(
+  map(continuous_param_list, ~linear_logistic_regression_modeller(comparison_tbs[[1]], .,'Thick','Thin', covars=c('age','sex','bmi', 'FieldStrength'))) %>% bind_rows(),
+  map(continuous_param_list, ~linear_logistic_regression_modeller(comparison_tbs[[2]], .,'MYBPC3_pLOF', 'MYBPC3_nonLOF', covars=c('age','sex','bmi', 'FieldStrength'))) %>% bind_rows(),
+  map(continuous_param_list, ~linear_logistic_regression_modeller(comparison_tbs[[3]], .,'MYBPC3', 'MYH7', covars=c('age','sex','bmi', 'FieldStrength'))) %>% bind_rows(),
+  map(continuous_param_list,~linear_logistic_regression_modeller(comparison_tbs[[4]], .,'P/LP','VUS', covars=c('age','sex','bmi', 'FieldStrength')))%>% bind_rows()
+)
+
+cont_lm_summary_tb <- bind_rows(lm_results_list) %>%
+  mutate(comparison = str_c(group1, ' vs. ', group2)) %>%
+  left_join(select(label_tb,Variable, Label),by=c('pheno'='Variable')) %>%
+  mutate(estimate = - estimate) %>% #Invert the estimate to reflect group1 vs. group2 
+  select(-term) %>%
+  mutate(Label_short = case_when(
+    pheno == 'wallthkmax' ~ 'maxLVWT',
+    pheno == 'lvmassi' ~ 'LVMi',
+    pheno == 'lge_total' ~ 'LGE',
+    pheno == 'ecvfwhole' ~ 'ECVF',
+    pheno == 'lvef' ~ 'LVEF',
+    pheno == 'lvs_ellmean' ~ '-LongStrain',
+    pheno == 'lvs_eccmean' ~ '-CircStrain',
+    pheno == 'lvs_errmean' ~ 'RadStrain'
+  )) %>%
+    mutate(Label_short = str_c(Label_short, ' (', comparison,')'))
+
+#Makes the label reflect the normalisation
+cont_lm_summary_tb <-  cont_lm_summary_tb %>%
+  mutate(Label= case_when(
+      pheno %in% scaled_cols ~ str_replace(Label, '\\([^ ]+\\)$', '(SD(Log(%)))'),
+      pheno %in% phenos_of_interest ~ str_replace(Label, '\\([^ ]+\\)$', '(SD)')))
+
+  cont_lm_summary_tb <- colour_hardcoder(cont_lm_summary_tb)
+
+rm(lm_results_list)
+```
+
+This plots out the summary plot from the continuous phenotypes via linear regression - so adjusted for age/sex and BSA if necessary.
+
+```{r lm_summary, fig.width=9, fig.height=6}
+summary_plotter(cont_lm_summary_tb,output_path='genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/', mtc='fdr',confint=T, label=T, test='LinearRegression',xlabel='Coefficient Estimate', height=7, width=9, shape_values=c(15,16,17,4))
+
+write_tsv(cont_lm_summary_tb, 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/cont_summary_tb.tsv')
+
+#This is for publication
+summary_plotter(cont_lm_summary_tb,output_path='genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/', mtc='fdr',confint=T, poster=T, test='LinearRegression',xlabel='Coefficient Estimate', height=6, width=11, shape_values=c(15,16,17,4))
+```
+
+This outputs the summary plot as facetted forest plots instead with significance stars for multiple testing comparison.
+
+```{r}
+cont_lm_summary_tb <- read_tsv('genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/cont_summary_tb.tsv') %>%
+  mutate(Label_short = str_match(Label_short, '(^[^()]+)')[,2]) %>%
+  select(-Label) %>%
+  dplyr::rename(Label = Label_short, predictor_label = comparison) %>%
+  mutate(adj_p = p.adjust(pval, method='BH'))  %>%
+  mutate(predictor_reported = predictor_label)
+
+summary_forest_plotter(cont_lm_summary_tb, 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/', file_name = 'LinearRegression_summary_forestplot_fdr.png', sigphenos_only=F,facet_order=c(c('Thick vs. Thin','MYBPC3 vs. MYH7','MYBPC3_pLOF vs. MYBPC3_nonLOF','P/LP vs. VUS')), height=9, width=6)
+```
+
+This also outputs the summary tibble but after running the linear regression without transformation (to enable extraction of coefficient values in native measurement units except for LGE which is logged)
+
+```{r}
+lm_results_list_notransform <- list(
+  map(continuous_param_list, ~linear_logistic_regression_modeller(comparison_tbs_notransform[[1]], .,'Thick','Thin', covars=c('age','sex','bmi', 'FieldStrength'))) %>% bind_rows(),
+  map(continuous_param_list, ~linear_logistic_regression_modeller(comparison_tbs_notransform[[2]], .,'MYBPC3_pLOF', 'MYBPC3_nonLOF', covars=c('age','sex','bmi', 'FieldStrength'))) %>% bind_rows(),
+  map(continuous_param_list, ~linear_logistic_regression_modeller(comparison_tbs_notransform[[3]], .,'MYBPC3', 'MYH7', covars=c('age','sex','bmi', 'FieldStrength'))) %>% bind_rows(),
+  map(continuous_param_list,~linear_logistic_regression_modeller(comparison_tbs_notransform[[4]], .,'P/LP','VUS', covars=c('age','sex','bmi', 'FieldStrength')))%>% bind_rows()
+)
+
+cont_lm_summary_tb_notransform <- bind_rows(lm_results_list_notransform) %>%
+  mutate(comparison = str_c(group1, ' vs. ', group2)) %>%
+  left_join(select(label_tb,Variable, Label),by=c('pheno'='Variable')) %>%
+  mutate(estimate = - estimate) %>% #Invert the estimate to reflect group1 vs. group2 
+  select(-term) %>%
+  mutate(Label_short = case_when(
+    pheno == 'wallthkmax' ~ 'maxLVWT',
+    pheno == 'lvmassi' ~ 'LVMi',
+    pheno == 'lge_total' ~ 'LGE',
+    pheno == 'ecvfwhole' ~ 'ECVF',
+    pheno == 'lvef' ~ 'LVEF',
+    pheno == 'lvs_ellmean' ~ '-LongStrain',
+    pheno == 'lvs_eccmean' ~ '-CircStrain',
+    pheno == 'lvs_errmean' ~ 'RadStrain'
+  )) %>%
+    mutate(Label_short = str_c(Label_short, ' (', comparison,')'))
+
+  cont_lm_summary_tb_notransform <- colour_hardcoder(cont_lm_summary_tb_notransform)
+
+write_tsv(cont_lm_summary_tb_notransform, 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/cont_summary_tb_notransform.tsv')
+```
+
+I also need to check the assumptions of linear modelling to see which are valid models. These include
+
+- Linear relationship between predictor and outcome
+- Normally distributed residuals
+- Homoscedasticity (residuals have constant variance)
+- Independence of residuals
+
+From the diagnostic plots,  for good assumptions met, check for:
+
+1) Plot 1 (residuals vs. fitted) should be a horizontal line without patterns -> linearity relationship assumption OK
+2) Plot 2 (QQ) should have dots following the straight, dashed line -> normality of residuals assumption OK
+3) Plot 3 (Scale-Location) should have a horizontal line with equally spread points -> homoscedasticity
+4) Plot 4 (Residuals vs. Leverage) IDs influential points which might influence the regression fit
+  - Generally you would look for outliers with a magnitude of >3 (+3 or -3) standardised residuals (i.e outliers exceeding 3 standard deviations) and high-leverage points.
+  - A good high-leverage threshold is 2(p+1)/n where p is the number of predictors and n is the number of observations so here ~ 8/800 (if using all sarc-positive) so ~0.01
+
+
+```{r lm_assumption_checker}
+comparison_names <- c('Thick vs. Thin','MYBPC3_pLOF vs. MYBPC3_nonLOF', 'MYBPC3 vs. MYH7','P/LP vs. VUS_FP/VUS')
+phenotype_names <- map_chr(continuous_param_list, ~.[[1]])
+
+lm_list <- list(
+  map(continuous_param_list, ~linear_logistic_regression_modeller(comparison_tbs[[1]], .,'Thick','Thin', covars=c('age','sex','bmi', 'FieldStrength'), model_return=T)) ,
+  map(continuous_param_list, ~linear_logistic_regression_modeller(comparison_tbs[[2]], .,'MYBPC3_pLOF','MYBPC3_nonLOF', covars=c('age','sex','bmi', 'FieldStrength'), model_return=T)),
+  map(continuous_param_list, ~linear_logistic_regression_modeller(comparison_tbs[[3]], .,'MYBPC3','MYH7', covars=c('age','sex','bmi', 'FieldStrength'), model_return=T)) ,
+  map(continuous_param_list,~linear_logistic_regression_modeller(comparison_tbs[[4]], .,'P/LP','VUS', covars=c('age','sex','bmi', 'FieldStrength'), model_return=T))
+)
+
+#Naming all the lists and models
+names(lm_list) <- comparison_names
+for (i in seq(length(lm_list))){
+  names(lm_list[[i]]) <- phenotype_names
+}
+
+for (i in seq(length(lm_list))){
+  print(str_c('Diagnostic plots of linear regression for comparison ',names(lm_list)[i]))
+  walk2(lm_list[[i]], phenotype_names,~diagnostic_plotter(.x,.y))
+}
+```
+
+## Wilcoxon Rank Sum Test
+
+Now we generate comparison plots between the two groups of comparison for all MTC-significant signals from LM and simultaneously run a statistical test for that phenotype.
+
+All NA values are filtered out and resulting counts per group are printed in the plot.
+
+```{r plot_test}
+mtc_sig_lm <- cont_lm_summary_tb %>%
+  mutate(adj_pval = p.adjust(pval, method='fdr')) %>%
+  filter(adj_pval < 0.05) %>%
+  select(-adj_pval)
+
+print(mtc_sig_lm$Label_short)
+
+#Run the pairwise Wilcoxon rank sum tests and distribution plotting for each MTC-significant comparison but on the non-transformed phenotypes
+
+thick_vs_thin_cont_results <- map(
+  continuous_param_list[names(continuous_param_list) %in% c('wallthkmax','lvmassi')],
+  ~plot_tester(input_tb=comparison_tbs_notransform[[1]],.,group1_name='Thick', group2_name='Thin', output_path='genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/2_Wilcoxon/thick_thin')
+  ) %>% 
+    bind_rows()
+
+mybpc3_vs_myh7_cont_results <- map(
+  continuous_param_list[names(continuous_param_list) %in% c('wallthkmax','lvef')],
+  ~plot_tester(input_tb=comparison_tbs_notransform[[3]],.,group1_name='MYBPC3', group2_name='MYH7',output_path='genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/2_Wilcoxon/mybpc3_myh7')
+   )%>% 
+    bind_rows()
+
+plp_vs_vusfpvus_cont_results <- map(
+  continuous_param_list[names(continuous_param_list) %in% c('lge_total')],
+  ~plot_tester(input_tb=comparison_tbs_notransform[[4]],.,group1_name='P/LP', group2_name='VUS', output_path='genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/2_Wilcoxon/p_lp_vs_vusfp_vus')
+  ) %>% 
+    bind_rows()
+
+cont_wilcoxon_summary_tb <- thick_vs_thin_cont_results %>%
+  bind_rows(mybpc3_vs_myh7_cont_results) %>%
+  bind_rows(plp_vs_vusfpvus_cont_results)
+
+rm(thick_vs_thin_cont_results,mybpc3_vs_myh7_cont_results,plp_vs_vusfpvus_cont_results)
+```
+

@@ -1,0 +1,120 @@
+---
+title: "Comparison of HCMR Case Rare-Variant Carriers on Endophenotype - Meta-Analysis"
+author: "Jonathan Chan"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide   
+---
+
+## Meta Analysis
+
+```{r meta_import}
+library(meta)
+library(tidyverse)
+library(readxl)
+rm(list=ls())
+
+comparisons_meta <-read_excel('genetic_subset_analysis/RareVar/1_input//PriorComparisons.xlsx', sheet='CMR_Meta') %>% filter(!is.na(Study))#Import in most of the comparisons 
+comparisons_meta_lge <- read_excel('genetic_subset_analysis/RareVar/1_input//PriorComparisons.xlsx', sheet='LGE')%>% filter(!is.na(Study)) #Import in the lge_total separately because it is compared by medians (instead of by means like the rest of the phenotypes)
+
+#Import in the non-transformed data
+comparison_tbs_notransform <- read_rds('genetic_subset_analysis/RareVar/3_output/data/hcmr_comparison_tbs_notransform.rds')
+
+source('genetic_subset_analysis/common/hcmr_endophenotype_functions.R')
+```
+
+I also carry out meta-analysis on the significant conclusions drawn from the comparisons, using prior literature comparing CMR phenotypes in the rare variant subsets.
+
+The comparisons meta-analysed in 2-group analyses include
+
+- Thick vs. thin - maxLVWT
+- Thick vs. thin - LVMi
+- MYBPC3 vs. MYH7 - maxLVWT
+- MYBPC3 vs. MYH7 - LVEF
+- MYBPC3 vs. MYH7 - LGE
+
+The effect size used is difference in means for all comparisons except those involving LGE (which is non-normally distributed) so analysed via medians.
+All meta-analyses are conducted on raw data (so without adjusting for age/sex etc. covariates).
+
+```{r}
+#Define all the phenotypes and comparisons you want to compare in the meta-analysis here
+#By default I include all pairwise comparisons that were identified from prior literature.
+
+#Use the nontransformed summary statistics
+thick_vs_thin_hcmr<- hcmr_significant_results_grabber(comparison_tbs_notransform[[1]],'Thick','Thin',c('wallthkmax','lvmassi','lvef'))
+mybpc3_vs_myh7_hcmr<- hcmr_significant_results_grabber(comparison_tbs_notransform[[3]],'MYBPC3','MYH7',c('wallthkmax','lvef','lvmassi'))
+plp_vs_vusfpvus_hcmr<- hcmr_significant_results_grabber(comparison_tbs_notransform[[4]], 'P/LP','VUS',c('wallthkmax','lvef','lvmassi','lvs_eccmean','lvs_errmean'))
+
+#Get the HCMR results from LGE as medians
+thick_vs_thin_hcmr_lge <- hcmr_significant_results_grabber(comparison_tbs_notransform[[1]],'Thick','Thin',c('lge_total'),mean=F)
+mybpc3_vs_myh7_hcmr_lge <- hcmr_significant_results_grabber(comparison_tbs_notransform[[3]],'MYBPC3','MYH7',c('lge_total'),mean=F)
+plp_vs_vusfpvus_hcmr_lge <- hcmr_significant_results_grabber(comparison_tbs_notransform[[4]],'P/LP','VUS',c('lge_total'),mean=F)
+```
+
+```{r}
+#Overall with both the prior publications and with the HCMR summary statistics
+comparisons_meta <- full_join(comparisons_meta, bind_rows(thick_vs_thin_hcmr, mybpc3_vs_myh7_hcmr,plp_vs_vusfpvus_hcmr))
+
+comparisons_meta_lge <- full_join(comparisons_meta_lge, mybpc3_vs_myh7_hcmr_lge) %>%
+  full_join(thick_vs_thin_hcmr_lge) %>%
+  full_join(plp_vs_vusfpvus_hcmr_lge)
+
+rm(thick_vs_thin_hcmr,mybpc3_vs_myh7_hcmr, plp_vs_vusfpvus_hcmr,thick_vs_thin_hcmr_lge,mybpc3_vs_myh7_hcmr_lge,plp_vs_vusfpvus_hcmr_lge)
+```
+
+Now I actually apply meta-analysis using Mean Difference as the effect size with both
+
+- Fixed-effects inverse variance weighting
+- Random-effects inverse variance weighting with REML to estimate tau (the variance component).
+
+```{r}
+thick_vs_thin_wallthkmax <- meta_cont_from_tb(comparisons_meta, 'wallthkmax','Thick','Thin')
+thick_vs_thin_lvmassi <- meta_cont_from_tb(comparisons_meta, 'lvmassi','Thick','Thin')
+thick_vs_thin_lvef <- meta_cont_from_tb(comparisons_meta, 'lvef','Thick','Thin')
+thick_vs_thin_lge <- meta_cont_from_tb(comparisons_meta_lge, 'lge_total','Thick','Thin') #This uses the default of Luo equations for conversion of medians/quartiles to means/SDs
+
+mybpc3_vs_myh7_wallthkmax <- meta_cont_from_tb(comparisons_meta, 'wallthkmax','MYBPC3','MYH7')
+mybpc3_vs_myh7_lvmassi <- meta_cont_from_tb(comparisons_meta, 'lvmassi','MYBPC3','MYH7')
+mybpc3_vs_myh7_lvef <- meta_cont_from_tb(comparisons_meta, 'lvef','MYBPC3','MYH7')
+mybpc3_vs_myh7_lge <- meta_cont_from_tb(comparisons_meta_lge, 'lge_total','MYBPC3','MYH7') #This uses the default of Luo equations for conversion of medians/quartiles to means/SDs
+
+plp_vs_vusfpvus_wallthkmax <- meta_cont_from_tb(comparisons_meta, 'wallthkmax','P/LP','VUS')
+plp_vs_vusfpvus_lvmassi <- meta_cont_from_tb(comparisons_meta, 'lvmassi','P/LP','VUS')
+plp_vs_vusfpvus_lvef <- meta_cont_from_tb(comparisons_meta, 'lvef','P/LP','VUS')
+plp_vs_vusfpvus_lge <- meta_cont_from_tb(comparisons_meta_lge, 'lge_total','P/LP','VUS')
+plp_vs_vusfpvus_lvseccmean <- meta_cont_from_tb(comparisons_meta, 'lvs_eccmean','P/LP','VUS')
+plp_vs_vusfpvus_lvserrmean <- meta_cont_from_tb(comparisons_meta, 'lvs_errmean','P/LP','VUS')
+
+rm(list=ls(pattern='thick_vs_thin|mybpc3_vs_myh7|plp_vs_vusfpvus'))
+```
+
+### Sensitivity Meta-Analysis
+
+```{r meta-analysis_sensitivity, fig.width=12, fig.height=6}
+sensitivity_output_path <-'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/3_Meta/MD/Echo/sensitivity/1_RE/'
+
+#Sensitivity analysis - repeat the significant meta-analyses but with random-effects
+thick_vs_thin_wallthkmax <- meta_cont_from_tb(comparisons_meta, 'wallthkmax','Thick','Thin',random=T,plot_output_path = sensitivity_output_path)
+thick_vs_thin_lvmassi <- meta_cont_from_tb(comparisons_meta, 'lvmassi','Thick','Thin', #excluded_studies=c('Weissler-Snir et al, 2017','Coppini et al, 2014'),
+                                           random=T,plot_output_path = sensitivity_output_path)
+thick_vs_thin_lvef <- meta_cont_from_tb(comparisons_meta, 'lvef','Thick','Thin',random=T,plot_output_path = sensitivity_output_path)
+thick_vs_thin_lge <- meta_cont_from_tb(comparisons_meta_lge, 'lge_total','Thick','Thin',random=T,plot_output_path = sensitivity_output_path) #This uses the default of Luo equations for conversion of medians/quartiles to means/SDs
+
+mybpc3_vs_myh7_wallthkmax <- meta_cont_from_tb(comparisons_meta, 'wallthkmax','MYBPC3','MYH7',random=T,plot_output_path = sensitivity_output_path)
+mybpc3_vs_myh7_lvef <- meta_cont_from_tb(comparisons_meta, 'lvef','MYBPC3','MYH7',random=T,plot_output_path = sensitivity_output_path)
+mybpc3_vs_myh7_lge <- meta_cont_from_tb(comparisons_meta_lge, 'lge_total','MYBPC3','MYH7',random=T,plot_output_path = sensitivity_output_path) #This uses the default of Luo equations for conversion of medians/quartiles to means/SDs
+
+plp_vs_vusfpvus_lge <- meta_cont_from_tb(comparisons_meta_lge, 'lge_total','P/LP','VUS',random=T,plot_output_path = sensitivity_output_path)
+```
+
+```{r}
+#Sensitivity analysis - leave out the outlier but with random effects for those studies with significant heterogeneity in the initial meta-analysis
+sensitivity_output_path <-'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/3_Meta/MD/CMR/sensitivity/2_LOO_RE/'
+
+thick_vs_thin_lvmassi <- meta_cont_from_tb(comparisons_meta, 'lvmassi','Thick','Thin', excluded_studies=c('Weissler-Snir et al, 2017'),
+                                           random=T,plot_output_path = sensitivity_output_path)
+mybpc3_vs_myh7_lvef <- meta_cont_from_tb(comparisons_meta, 'lvef','MYBPC3','MYH7', excluded_studies=c('Miller et al, 2019'),random=T,plot_output_path = sensitivity_output_path)
+
+rm(list=ls(pattern='thick_vs_thin|mybpc3_vs_myh7|plp_vs_vusfpvus'))
+```

@@ -1,0 +1,1077 @@
+---
+title: "Comparison of PRS x Endophenotype in HCMR "
+author: "Jonathan Chan"
+date: "2026-01-09"
+output: 
+  html_document:
+    code_folding: hide   
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(viridis)
+library(tictoc)
+library(kableExtra)
+library(readxl)
+library(ggrepel)
+
+rm(list=ls())
+
+theme_set(theme_classic(base_size=14))
+source('genetic_subset_analysis/common/hcmr_endophenotype_functions.R')
+```
+
+# Import
+
+This imports in the HCMR data after preprocessing.
+
+```{r}
+total_df_notransform <- readRDS('output/data/total_notransform_nogenofilter_df.rds')
+
+#Use the 2446 individuals
+hcmr_ids <- read_tsv('genetic_subset_analysis/common/output/data/hcmr_agesex_rare_common_filtered_2446.tsv')
+
+#Convert false positive individuals to sarcomere-negative individuals (due to false positive MYBPC3-VUS variants)
+falsepositive_mybpc3_vus_individuals <- readRDS('genetic_subset_analysis/common/falsepositive_mybpc3_vus_individuals.rds')
+total_df_notransform <- total_df_notransform %>%
+  filter(HCR_IDs %in% hcmr_ids$HCR_IDs) %>% #Filter to 2446
+  mutate(sarcomere = ifelse(HCR_IDs %in% falsepositive_mybpc3_vus_individuals, FALSE, sarcomere)) #Convert to sarcomere-negative individuals (due to false positive MYBPC3-VUS variants)
+
+write_rds(total_df_notransform, 'output/data/total_notransform_df_2446_sarcchanged.rds')
+rm(hcmr_ids)
+
+#Add in the HCMR PRS scores (this is with the minimac-r2-filter for INFO 0.3-1.0) and computed with the intersectvars with UKB
+hcmr_prs <- read_tsv('genetic_subset_analysis/PRS/1_input/hcmr_imputedvars_prs.sscore') #2674 individuals with PRS
+
+# Add in the HCMR PCs which were derived from flashPCA2 from the HCMR hard-called genotypes
+hcmr_pcs <- read_delim('popgen/2_gwas/data/hcmr/HCMR_HARDCALLS/pcs_hcmr_10pcs')
+
+#This defines the phenotypes of interest (both the endophenotypes and covariates)
+covars <- c('bmi')
+endophenos_of_interest <- c('wallthkmax','lvmassi','lge_total','ecvfwhole','lvef','lvs_ellmean','lvs_eccmean','lvs_errmean')
+phenos_of_interest <- c(covars, endophenos_of_interest)
+
+continuous_param_list <- list(
+  c('wallthkmax','Maximal LV Wall Thickness (mm)'),
+  c('lvmassi','LV Mass Index (g/m2)'),
+  c('lge_total','LGE Mass over All Segments / LV Mass (%)'),
+  c('ecvfwhole','Whole LV Extracellular Volume Fraction (%)'),
+  c('lvef','LV Ejection Fraction (%)'),
+  c('lvs_ellmean','-Longitudinal LV Strain'),
+  c('lvs_eccmean','-Circumferential LV Strain'),
+  c('lvs_errmean','Radial LV Strain')
+  # c('entropy_LVWall_MAG_adj','Entropy of LV Wall from MAG LGE Images'),
+  # c('entropy_LVWall_PSIR_adj','Entropy of LV Wall from PSIR LGE Images')
+)
+```
+
+This visualises the distribution of each of the endophenotypes.
+
+```{r}
+dist_plotter <- function(input_tb, phenos_of_interest){
+  plot_tb <- input_tb %>%
+    select(all_of(phenos_of_interest)) %>%
+    pivot_longer(cols = everything(), names_to = "pheno", values_to = "value")
+
+  plot_tb %>%
+    ggplot(aes(x = value)) +
+    geom_density(fill = "lightblue", alpha = 0.5) +
+    facet_wrap(~ pheno, scales = "free") +
+    labs(title = "Density Plots of Endophenotypes") +
+    theme_minimal()
+}
+
+dist_plotter(total_df_notransform, phenos_of_interest)
+```
+
+# Data Preprocessing
+
+This preprocesses + filters the data within the sarcomere-positive and sarcomere-negative individuals.
+
+```{r}
+data_preprocessor <- function(total_df_notransform, hcmr_prs, phenos_of_interest, sarcomere_status=c(T,F), prs_scale=T, hcmr_pcs=NULL){
+
+  output_tb <- total_df_notransform %>%
+    filter(sarcomere %in% sarcomere_status) %>% 
+    left_join(select(hcmr_prs, HCR_IDs=IID, cv_prs=SCORE1_AVG)) 
+
+  if(isTRUE(prs_scale)){
+    #Scale the PRS within the sarcomere-positive individuals
+    output_tb <- output_tb %>%
+      mutate(cv_prs = scale(cv_prs)[,1])
+  }
+
+  if('Smoking' %in% phenos_of_interest){
+    output_tb <- output_tb %>%
+      mutate(Smoking = case_when(cursmoke == 1 | pstsmoke ==1 ~ 1, #Collapses into single variable of past/current smoker vs. never
+                                 cursmoke == 0 & pstsmoke == 0 ~ 0,
+                                 T~NA
+          ))
+  }
+
+  if('cmrdiabp' %in% phenos_of_interest){
+    output_tb <- dplyr::rename(output_tb, 'DBP' = 'cmrdiabp')
+  }
+
+  output_tb <- output_tb %>%
+  select(HCR_IDs,age,sex=gender,bsa,
+         all_of(phenos_of_interest), 
+         cv_prs, sarcomere) %>% 
+  filter(if_any(phenos_of_interest, negate(is.na)))
+
+  if(!is_null(hcmr_pcs)){
+    output_tb <- output_tb %>%
+      left_join(select(hcmr_pcs, HCR_IDs=IID, PC1:PC10)) #Add the PCs
+  }
+
+  return(output_tb)
+}
+
+sarcall <- data_preprocessor(total_df_notransform, hcmr_prs, phenos_of_interest, sarcomere_status=c(T,F), hcmr_pcs=hcmr_pcs)
+sarcpos <- data_preprocessor(total_df_notransform, hcmr_prs, phenos_of_interest,sarcomere_status=T, hcmr_pcs=hcmr_pcs)
+sarcneg <- data_preprocessor(total_df_notransform, hcmr_prs, phenos_of_interest, sarcomere_status=F, hcmr_pcs=hcmr_pcs)  
+
+rm(total_df_notransform, hcmr_prs)
+```
+
+# Endophenotype Association
+
+This looks for association between PRS and CMR endophenotypes:
+
+- Hypertrophy: wallthkmax; lvmassi
+- Fibrosis: lge_total; ecvfwhole
+- Hypercontractility: LVEF (from CMR) and LV strain parameters (lvs_ellmean; eccmean; errmean)
+
+## Linear Regression Approach
+
+This tests for association between the continuous PRS and the various continuous endophenotypes. 
+It applies rank-based inverse normalisation to all of the continuous endophenotypes to enable comparison in a summary plot. 
+
+It uses age,sex and 3PCs for the PRS-based analysis.
+
+```{r}
+lm_runner <- function(input_tb, phenos_of_interest, continuous_param_list, output_path, predictor_name = 'cv_prs', predictor_type='continuous',covars = c('age','sex'), label_tb_path='output/data/combo_labels_20260123.tsv', scaler = 'log',scaled_cols = c('lge_total'), additional_predictors_to_report = NULL, summary_plot=T){
+
+  if(scaler %in% c('','none')){
+    #No scaling
+  } else if(scaler == 'log'){
+    input_tb <- input_tb %>%
+      mutate(across(all_of(scaled_cols), ~log1p(.))) 
+  } else if(scaler == 'rint'){
+      input_tb <- inverse_rank_transformer(input_tb,scaled_cols)
+  }
+
+  #Run the association analysis between PRS and endophenotypes
+  endophenotype_lm_results <- map(continuous_param_list, ~linear_logistic_regression_modeller(input_tb ,.,predictor=predictor_name,predictor_type=predictor_type, covars=covars, additional_predictors_to_report=additional_predictors_to_report)) %>% bind_rows()
+
+  #Attach label
+  label_tb <- read_tsv(label_tb_path) 
+
+  endophenotype_lm_results <- endophenotype_lm_results %>%
+    left_join(select(label_tb,Variable, Label),by=c('pheno'='Variable'))%>%
+    mutate(Label_short = case_when(
+      pheno == 'wallthkmax' ~ 'maxLVWT',
+      pheno == 'lvmassi' ~ 'LVMi',
+      pheno == 'lge_total' ~ 'LGE',
+      pheno == 'ecvfwhole' ~ 'ECVF',
+      pheno == 'lvef' ~ 'LVEF',
+      pheno == 'lvs_ellmean' ~ '-LongStrain',
+      pheno == 'lvs_eccmean' ~ '-CircStrain',
+      pheno == 'lvs_errmean' ~ 'RadStrain')) %>%
+    mutate(Label = case_when(
+      pheno %in% scaled_cols~ str_replace(Label, '\\([^ ]+\\)$', '(Log(%))'),
+      TRUE ~ Label
+    )) #Make the label reflect the normalisation but only for the scaled col
+
+    endophenotype_lm_results<- colour_hardcoder(endophenotype_lm_results)
+
+  #-------------------------------------------------------------------------
+  #Create another copy of the endophenotype_lm_results for plotting that has run the linear regression after applying standard scaling (to SD) 
+  #This occurs after the specific scaling (e.g log-transformation for skewed variables)
+  input_tb_scaled <- input_tb %>%
+    mutate(across(all_of(phenos_of_interest), ~scale(.)[,1]))
+
+  endophenotype_lm_results_scaled <- map(continuous_param_list, ~linear_logistic_regression_modeller(input_tb_scaled ,.,predictor=predictor_name,predictor_type=predictor_type, covars=covars, additional_predictors_to_report=additional_predictors_to_report)) %>% bind_rows()%>%
+    left_join(select(label_tb,Variable, Label),by=c('pheno'='Variable'))%>%
+    mutate(Label_short = case_when(
+      pheno == 'wallthkmax' ~ 'maxLVWT',
+      pheno == 'lvmassi' ~ 'LVMi',
+      pheno == 'lge_total' ~ 'LGE',
+      pheno == 'ecvfwhole' ~ 'ECVF',
+      pheno == 'lvef' ~ 'LVEF',
+      pheno == 'lvs_ellmean' ~ '-LongStrain',
+      pheno == 'lvs_eccmean' ~ '-CircStrain',
+      pheno == 'lvs_errmean' ~ 'RadStrain')) 
+
+  #Makes the label reflect the normalisation but only for the scaled col
+  endophenotype_lm_results_scaled <- mutate(endophenotype_lm_results_scaled, 
+    Label= case_when(
+      pheno %in% scaled_cols ~ str_replace(Label, '\\([^ ]+\\)$', '(SD(Log(%)))'),
+      pheno %in% phenos_of_interest ~ str_replace(Label, '\\([^ ]+\\)$', '(SD)')))
+      
+  #Hardcode the colour
+  endophenotype_lm_results_scaled <- colour_hardcoder(endophenotype_lm_results_scaled)
+
+  #-------------------------------------------------------------------------
+  if(!is_null(additional_predictors_to_report)){
+    endophenotype_lm_results_plot <- endophenotype_lm_results_scaled %>%
+      filter(predictor_reported %in% c(predictor_name))
+  } else{
+    endophenotype_lm_results_plot <- endophenotype_lm_results_scaled
+  }
+
+  #Adjust the plotting so that shape of the summary corresponds to comparison
+  if(predictor_type == 'group'){
+    endophenotype_lm_results_plot <- mutate(endophenotype_lm_results_plot, comparison = str_c(str_remove(term, 'group'), ' vs. Reference Group'))
+
+    if(isTRUE(summary_plot)){
+        summary_plotter(endophenotype_lm_results_plot, output_path=output_path,mtc='fdr', confint=T, label=T, test='LM', shape_values =c(1,2), comporder = c('Intermediate PRS vs. Reference Group', 'High PRS vs. Reference Group'))
+    }
+
+  } else{  
+    if(isTRUE(summary_plot)){
+      summary_plotter(endophenotype_lm_results_plot, output_path=output_path,mtc='fdr', confint=T, label=T, test='LM')
+    }
+  }
+
+  return(list(endophenotype_lm_results,endophenotype_lm_results_scaled))
+}
+```
+
+```{r}
+#Run the association analysis with LM between continuous PRS and endophenotypes
+#Allcomer analyses
+allcomer_lm <- lm_runner(sarcall,phenos_of_interest, continuous_param_list, output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/', covars=c('age','sex','bmi','sarcomere','PC1','PC2','PC3'), additional_predictors_to_report=c('sarcomere'), summary_plot=F)#i.e. after standard scaling
+
+#This is a custom plot because I want to adjust the p-values of the sarcomere + cv_prs together but plot on 2 different plots
+allcomer_lm[[2]]  <- allcomer_lm[[2]]  %>%
+  mutate(adj_p = p.adjust(pval, method='fdr'))
+
+summary_plotter(filter(allcomer_lm[[2]] ,predictor_reported=='cv_prs'), output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/', confint=T, label=T, test='LM', pval_col='adj_p', suffix='_cvprs_only')
+summary_plotter(filter(allcomer_lm[[2]] ,predictor_reported=='sarcomere'), output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/', confint=T, label=T, test='LM', pval_col='adj_p', suffix='_sarcomere_only')
+
+#Run and plot subgroup analyses
+sarcpos_lm <- lm_runner(sarcpos,phenos_of_interest, continuous_param_list, output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcpos/', covars=c('age','sex','bmi','PC1','PC2','PC3'))
+sarcneg_lm <- lm_runner(sarcneg,phenos_of_interest, continuous_param_list, output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcneg/', covars=c('age','sex','bmi','PC1','PC2','PC3'))
+```
+
+This plots a forest plot for the significant associations with both the PRS and the sarcomere status predictors (separated by facetted plot) with an aligned data table which shows the non-standardised beta values with their 95% confidence intervals for each significant PRS or sarcomere x endophenotype association.
+
+```{r}
+#This uses allcomer_lm[[2]] to select the significant associations for both cv_prs and sarcomere predictors and then plots the forest plot from allcomer_lm (with */**/*** to indicate adjusted p-value) and uses the allcomer_lm[[1]] to construct the aligned data table
+
+forest_plot_with_aligned_table(
+  lm_results_scaled   = allcomer_lm[[2]],
+  lm_results_unscaled = allcomer_lm[[1]],
+  output_dir = "genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/"
+)
+```
+
+```{r}
+#Run the association analysis with LM between binned PRS and endophenotypes
+sarcall_binned <- sarcall %>%
+  mutate(group = case_when(
+    cv_prs <= quantile(cv_prs, probs=0.2) ~ 'Low PRS',
+    cv_prs > quantile(cv_prs, probs=0.2) & cv_prs <= quantile(cv_prs, probs=0.80) ~ 'Intermediate PRS',
+    cv_prs > quantile(cv_prs, probs=0.80) ~ 'High PRS',
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(group = factor(group, levels=c('Low PRS','Intermediate PRS','High PRS'))) %>%
+  filter(!is.na(group))
+
+endophenotype_lm_results_binned <- lm_runner(sarcall_binned,phenos_of_interest, continuous_param_list, output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/binned/', predictor_name='group', predictor_type='group', covars=c('age','sex','bmi','sarcomere','PC1','PC2','PC3')) #This one does not report sarcomere as an additional predictor so does not plot those points
+```
+
+
+This also plots a scatter plot comparing the estimate from the cv_prs predictor and the sarcomereTRUE predictor in the allcomer analysis with 95% confidence intervals in both directions.
+
+```{r}
+scatter_lm_estimate_comparison <- function(
+  lm_results,
+  output_path,
+  predictors = c("cv_prs", "sarcomere"),
+  label_tb_path = "output/data/combo_labels_20260123.tsv",
+  title = NULL,
+  x_label = 'Coefficient for PRS (SD)',
+  y_label = 'Coefficient for Sarcomeric Mutation Status',
+  file_suffix = NULL
+) {
+  stopifnot(length(predictors) == 2)
+
+  dir.create(output_path, showWarnings = FALSE, recursive = TRUE)
+
+  p1 <- predictors[[1]]
+  p2 <- predictors[[2]]
+
+  # Filter to the two predictors and compute Wald-type 95% CI
+  plot_tb <- lm_results |>
+    filter(predictor_reported %in% predictors) |>
+    mutate(
+      conf_low = estimate - 1.96 * SE,
+      conf_high = estimate + 1.96 * SE
+    ) |>
+    select(pheno, predictor_reported, estimate, conf_low, conf_high, Label, colour) |>
+    pivot_wider(
+      names_from = predictor_reported,
+      values_from = c(estimate, conf_low, conf_high)
+    )
+
+  # Ensure both predictors exist after pivoting (avoid cryptic ggplot errors)
+  required_cols <- c(
+    paste0("estimate_", p1), paste0("conf_low_", p1), paste0("conf_high_", p1),
+    paste0("estimate_", p2), paste0("conf_low_", p2), paste0("conf_high_", p2)
+  )
+  missing_cols <- setdiff(required_cols, names(plot_tb))
+  if (length(missing_cols) > 0) {
+    stop(
+      "Missing columns after pivot (did you pass valid `predictors`?) Missing: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+
+  # Symmetric limits across both axes so comparisons are visually fair
+  lim <- range(
+    plot_tb[[paste0("conf_low_", p1)]],
+    plot_tb[[paste0("conf_high_", p1)]],
+    plot_tb[[paste0("conf_low_", p2)]],
+    plot_tb[[paste0("conf_high_", p2)]],
+    0,
+    na.rm = TRUE
+  )
+  lim <- max(abs(lim)) * c(-1, 1)
+
+  if (is.null(title)) {
+    title <- str_glue("Comparison of LM Estimates: {p1} vs {p2}")
+  }
+  if (is.null(x_label)) x_label <- str_glue("Estimate for {p1}")
+  if (is.null(y_label)) y_label <- str_glue("Estimate for {p2}")
+
+  if (is.null(file_suffix)) file_suffix <- str_glue("{p1}_vs_{p2}")
+
+  p <- ggplot(
+    plot_tb,
+    aes(x = .data[[paste0("estimate_", p1)]], y = .data[[paste0("estimate_", p2)]])
+  ) +
+    geom_errorbar(
+      aes(
+        ymin = .data[[paste0("conf_low_", p2)]],
+        ymax = .data[[paste0("conf_high_", p2)]]
+      )
+    ) +
+    geom_errorbarh(
+      aes(
+        xmin = .data[[paste0("conf_low_", p1)]],
+        xmax = .data[[paste0("conf_high_", p1)]]
+      )
+    ) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+    geom_point(aes(color = Label)) +
+    scale_colour_manual(
+      values = setNames(plot_tb$colour, plot_tb$Label),
+      guide = guide_legend(title = "Phenotype")
+    ) +
+    coord_fixed(ratio = 1, xlim = lim, ylim = lim) +
+    labs(
+      title = title,
+      x = x_label,
+      y = y_label,
+      col = "Phenotype"
+    )
+
+  ggsave(
+    filename = file.path(output_path, str_glue("lm_estimate_comparison_{file_suffix}.png")),
+    plot = p,
+    width = 9,
+    height = 6,
+    dpi = 600
+  )
+
+  p
+}
+#Run for PRS for sarcomere in all-comer analysis (the scaled one)
+scatter_lm_estimate_comparison(allcomer_lm[[2]], output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/')
+
+#Also compare the estimates for cv_prs in sarcpos_lm vs. sarcneg_lm
+scatter_lm_estimate_comparison(
+  bind_rows(
+    sarcpos_lm[[2]] %>% mutate(predictor_reported = paste0(predictor_reported, "_sarcpos")),
+    sarcneg_lm[[2]] %>% mutate(predictor_reported = paste0(predictor_reported, "_sarcneg"))
+  ),
+  output_path = 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/',
+  predictors = c("cv_prs_sarcpos", "cv_prs_sarcneg"),
+  x_label = "Coefficient for PRS in Sarcomere-Positive Individuals (SD)",
+  y_label = "Coefficient for PRS in Sarcomere-Negative Individuals (SD)",
+  file_suffix = "cv_prs_sarcpos_vs_sarcneg"
+)
+
+```
+
+## Wilcoxon Rank Sum Test + Density Plot Visualisation
+
+This compares the PRS subgroups by endophenotype.
+
+```{r}
+discrete_group_tester <- function(
+  input_tb,
+  continuous_param_list,
+  output_path,
+  label_tb_path = "output/data/combo_labels_20260123.tsv",
+  quantile_thresholds = c(0.20, 0.80)
+){
+  dir.create(output_path, showWarnings = FALSE, recursive = TRUE)
+
+  prs_thresholds <- quantile(input_tb$cv_prs, probs = quantile_thresholds, na.rm = TRUE)
+
+  plot_tb <- input_tb |>
+    mutate(
+      group = case_when(
+        cv_prs <= prs_thresholds[1] ~ "Low PRS",
+        cv_prs > prs_thresholds[1] & cv_prs <= prs_thresholds[2] ~ "Intermediate PRS",
+        cv_prs > prs_thresholds[2] ~ "High PRS",
+        TRUE ~ NA_character_
+      ),
+      group = factor(group, levels = c("Low PRS", "Intermediate PRS", "High PRS"))
+    ) |>
+    filter(!is.na(group))
+
+  # Labels
+  label_tb <- read_tsv(label_tb_path)
+
+  # Helper: safe wilcox -> pval and median diff
+  pairwise_stats <- function(df, g1, g2) {
+    x1 <- df |> filter(group == g1) |> pull(pheno) |> na.omit()
+    x2 <- df |> filter(group == g2) |> pull(pheno) |> na.omit()
+
+    if (length(x1) < 3 || length(x2) < 3) {
+      return(tibble(
+        group1 = g1,
+        group2 = g2,
+        med1 = median(x1, na.rm = TRUE),
+        med2 = median(x2, na.rm = TRUE),
+        median_diff = NA_real_,
+        p_value = NA_real_
+      ))
+    }
+
+    tibble(
+      group1 = g1,
+      group2 = g2,
+      med1 = median(x1, na.rm = TRUE),
+      med2 = median(x2, na.rm = TRUE),
+      median_diff = median(x2, na.rm = TRUE) - median(x1, na.rm = TRUE),
+      p_value = wilcox.test(x1, x2)$p.value
+    )
+  }
+
+  # Loop phenotypes: compute tests + plot densities with in-plot annotation
+  results <- map(continuous_param_list, function(param) {
+    pheno_var <- param[1]
+    pheno_label <- param[2]
+
+    if(pheno_var == 'lge_total'){
+      pheno_label <- 'Total LGE over All Segments (6 SD) (%)' #To represent lack of normalisation in these analyses
+    }
+
+    df <- plot_tb |>
+      select(pheno = all_of(pheno_var), group) |>
+      drop_na()
+
+    # Kruskal-Wallis
+    kw_p <- tryCatch(
+      kruskal.test(pheno ~ group, data = df)$p.value,
+      error = function(e) NA_real_
+    )
+
+    # Pairwise Wilcoxon: (Low vs Mid), (Mid vs High), (Low vs High)
+    pw <- bind_rows(
+      pairwise_stats(df, "Low PRS", "Intermediate PRS") |> mutate(comparison = "Low vs Intermediate"),
+      pairwise_stats(df, "Intermediate PRS", "High PRS") |> mutate(comparison = "Intermediate vs High"),
+      pairwise_stats(df, "Low PRS", "High PRS") |> mutate(comparison = "Low vs High")
+    ) |>
+      mutate(
+        pheno = pheno_var,
+        label = pheno_label
+      )
+
+    # Build annotation text block
+    fmt_p <- function(x) ifelse(is.na(x), "NA", signif(x, 3))
+    fmt_n <- function(x) ifelse(is.na(x), "NA", signif(x, 3))
+
+    ann <- c(
+      str_glue("Kruskal-Wallis p = {fmt_p(kw_p)}"),
+      str_glue(
+        "{pw$comparison[1]}: Δmedian = {fmt_n(pw$median_diff[1])}, p = {fmt_p(pw$p_value[1])}"
+      ),
+      str_glue(
+        "{pw$comparison[2]}: Δmedian = {fmt_n(pw$median_diff[2])}, p = {fmt_p(pw$p_value[2])}"
+      ),
+      str_glue(
+        "{pw$comparison[3]}: Δmedian = {fmt_n(pw$median_diff[3])}, p = {fmt_p(pw$p_value[3])}"
+      )
+    ) |>
+      paste(collapse = "\n")
+
+    # Place annotation inside plot region
+    x_rng <- range(df$pheno, na.rm = TRUE)
+    x_pos <- x_rng[2] - 0.4 * diff(x_rng)
+    y_pos <- Inf
+
+    p <- ggplot(df, aes(x = pheno, fill = group)) +
+      geom_density(alpha = 0.5, linewidth = 0.7) +
+      scale_fill_brewer(palette = "Set2") +
+      labs(
+        title = str_glue('{pheno_label} (N = {nrow(df)})'),
+        x = pheno_label,
+        y = "Density",
+        fill = "PRS group"
+      ) +
+      annotate(
+        "label",
+        x = x_pos,
+        y = y_pos,
+        label = ann,
+        hjust = 0,
+        vjust = 1,
+        label.size = 0.25,
+        size = 3.2,
+        fill = "white",
+        alpha = 0.9
+      ) +
+      coord_cartesian(clip = "off") +
+      theme(
+        plot.margin = margin(5.5, 40, 5.5, 5.5),
+        legend.position = "bottom"
+      )
+
+    ggsave(
+      filename = file.path(output_path, str_glue("{pheno_var}_prs_3group_density.png")),
+      plot = p,
+      width = 9,
+      height = 5,
+      dpi = 300
+    )
+
+    print(p)
+  })
+}
+```
+
+```{r}
+#Allcomer analysis
+mtc_sig_lm_phenos_sarcall <- c('lvmassi','wallthkmax','lge_total')
+discrete_group_tester(sarcall, continuous_param_list[map_lgl(continuous_param_list, ~.[[1]] %in% mtc_sig_lm_phenos_sarcall)],
+'genetic_subset_analysis/PRS/3_output/1_Endophenotype/1_Wilcoxon/sarcall/')
+
+```
+
+```{r}
+#Subgroup analyses
+# discrete_group_tester(sarcpos,continuous_param_list,'genetic_subset_analysis/PRS/3_output/1_Endophenotype/1_Wilcoxon/sarcpos/')
+# discrete_group_tester(sarcneg,continuous_param_list,'genetic_subset_analysis/PRS/3_output/1_Endophenotype/1_Wilcoxon/sarcneg/')
+```
+
+
+# ARCHIVED - Significant Quantile Threshold
+
+## Single Thresholds
+
+This approach applies the maxstat package which does this threshold identification but for a single threshold that maximises the difference in phenotype given a cutoff for score.
+
+```{r}
+library(maxstat)
+
+run_maxstat_analysis <- function(input_tb, 
+                                 pheno_of_interest, 
+                                 score_col = 'cv_prs', 
+                                 probs = 0.2, #Minimum proportion of samples in a group e.g. smallest quantile
+                                 direction = "bottom") { # "bottom" or "top"
+  
+  # 1. Handle Directionality
+  #    If direction is "top", we invert the score.
+  #    Mathematically: "Bottom of Inverted Score" == "Top of Original Score"
+  clean_df <- input_tb %>%
+    select(pheno = {{ pheno_of_interest }}, 
+           raw_score = {{ score_col }}) %>%
+    drop_na() %>%
+    rowwise() %>%
+    mutate(score = ifelse(direction == "top", raw_score * -1, raw_score)) %>%
+    ungroup() %>%
+    select(-raw_score) %>%
+    as.data.frame()
+
+  # print(clean_df)
+  
+  # 2. Run the Maximally Selected Rank Statistics test
+  ms_result <- maxstat.test(pheno ~ score, 
+                            data = clean_df, 
+                            smethod='Wilcoxon', 
+                            pmethod='Lau92',
+                            minprop = min(probs), # Sets the search floor (e.g., 10%)
+                            alpha = NULL)         # Return exact p-value
+  
+  # 3. Return a concise tidy summary
+  tibble(
+    pheno = pheno_of_interest,
+    optimal_score_cutpoint = as.numeric(ms_result$estimate),
+    optimal_quantile_cutpoint = ecdf(clean_df$score)(ms_result$estimate),
+    statistic = as.numeric(ms_result$statistic),
+    p_value = as.numeric(ms_result$p.value),
+    significance = if_else(p_value < 0.05, "Significant", "NS")
+  )
+}
+```
+
+```{r}
+#Run binary thresholding over sarcomere positive individuals
+sarcpos_binary_maxstat_thresh <- map(c('lvmassi'), ~run_maxstat_analysis(sarcpos, .x, direction='bottom')) %>% bind_rows()
+
+print(sarcpos_binary_maxstat_thresh)
+write_tsv(sarcpos_binary_maxstat_thresh, 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/3_Maxstat/sarcpos/sarcpos_binary_maxstat_thresholds.tsv')
+# sarcpos_binary_maxstat_thresh <- read_tsv('genetic_subset_analysis/PRS/3_output/1_Endophenotype/3_Maxstat/sarcpos/sarcpos_binary_maxstat_thresholds.tsv')
+
+#Run binary thresholding over sarcomere negative individuals
+sarcneg_binary_maxstat_thresh <- map(c('lvmassi','wallthkmax','lge_total','lvs_eccmean'), ~run_maxstat_analysis(sarcneg, .x, direction='bottom')) %>% bind_rows()
+write_tsv(sarcneg_binary_maxstat_thresh, 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/3_Maxstat/sarcneg/sarcneg_binary_maxstat_thresholds.tsv')
+# sarcneg_binary_maxstat_thresh <- read_tsv('genetic_subset_analysis/PRS/3_output/1_Endophenotype/3_Maxstat/sarcneg/sarcneg_binary_maxstat_thresholds.tsv')
+
+print(sarcneg_binary_maxstat_thresh)
+```
+
+```{r}
+#This function plots the density plots for each phenotype plotting the distribution of the phenotype for each of the two groups split by the optimal_score_cutpoint. The input argument will be the tibble of all summary but only plot the density plots for the phenotypes which are significant and ggsave to an argument-defined output_folder
+
+plot_maxstat_density <- function(input_tb, summary_tb, output_folder){
+  dir.create(output_folder, showWarnings = FALSE)
+  
+  significant_phenos <- summary_tb %>%
+    filter(significance == "Significant") %>%
+    pull(pheno)
+  
+  for (pheno in significant_phenos) {
+    cutpoint <- summary_tb %>%
+      filter(pheno == !!pheno) %>%
+      pull(optimal_score_cutpoint)
+
+    quantile_cutpoint <- summary_tb %>%
+      filter(pheno == !!pheno) %>%
+      pull(optimal_quantile_cutpoint)
+
+    pval <- summary_tb %>%
+      filter(pheno == !!pheno) %>%
+      pull(p_value)
+
+    plot_tb <- input_tb %>%
+      select(pheno = all_of(pheno), score = cv_prs) %>%
+      drop_na() %>%
+      mutate(group = ifelse(score <= cutpoint, "Low PRS", "High PRS"))
+
+    median_low <- plot_tb %>%
+      filter(group == "Low PRS") %>%
+      summarize(med = median(pheno, na.rm = TRUE)) %>%
+      pull(med)
+
+    median_high <- plot_tb %>%
+      filter(group == "High PRS") %>%
+      summarize(med = median(pheno, na.rm = TRUE)) %>%
+      pull(med)
+
+    median_diff <- median_high - median_low
+
+    p <- ggplot(plot_tb, aes(x = pheno, fill = group)) +
+      geom_density(alpha = 0.5) +
+      labs(
+      title = paste("Density Plot of", pheno, "by PRS Group"),
+      x = pheno,
+      y = "Density",
+      fill = "PRS Group",
+      caption = str_glue(
+        "PRS Quantile Threshold of {round(quantile_cutpoint, 3)*100}% by Maxstat\nDifference in Medians = {round(median_diff, 3)}\nCorrected p-value for Wilcoxon test = {round(pval,3)}"
+      )
+      )
+    
+    print(p)
+    
+    ggsave(filename = file.path(output_folder, paste0(pheno, "_maxstat_density_plot.png")), plot = p)
+  }
+}
+
+plot_maxstat_density(sarcneg, sarcneg_binary_maxstat_thresh, 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/3_Maxstat/sarcneg/')
+```
+
+## Double Thresholds for both Top and Bottom
+
+This applies a permutation based approach which performs the scans but then repeatedly permutes the phenotype across the individuals to compute a null distribution of the minimum p-value observed across all scans to compare the observed p-value against.
+
+```{r}
+library(broom) # For tidy model extraction
+
+run_permutation_scan <- function(input_tb, 
+                                 pheno_col, 
+                                 score_col = 'cv_prs',
+                                 covariates = NULL,       
+                                 test_method = "wilcox",  
+                                 scan_range = c(0.2, 0.4), 
+                                 step = 0.01, 
+                                 n_perms = 1000) {
+
+  # Conditional covariate logic provided by user
+  if(pheno_col == 'wallthkmax' && test_method == 'lm'){
+    covariates = c(covariates, 'bsa') 
+  }
+  
+  # 1. Prepare Data
+  clean_df <- input_tb %>% 
+    select(y = {{ pheno_col }}, 
+           s = {{ score_col }}, 
+           any_of(covariates)) %>% 
+    drop_na() %>%
+    arrange(s)
+  
+  y_vec <- clean_df$y
+  s_vec <- clean_df$s
+  cov_df <- clean_df %>% select(any_of(covariates)) 
+  
+  probs <- seq(scan_range[1], scan_range[2], by = step)
+  
+  # --- Helper: The Scanner ---
+  get_max_stats <- function(curr_y, curr_s, curr_covs) {
+    
+    # Pre-allocate vectors for THREE comparisons now
+    stats_bot <- numeric(length(probs))
+    stats_top <- numeric(length(probs))
+    stats_tvb <- numeric(length(probs)) # Top vs Bottom
+    
+    for (i in seq_along(probs)) {
+      x <- probs[i]
+      
+      # Define Cutoffs
+      cut_low <- quantile(curr_s, x)
+      cut_high <- quantile(curr_s, 1 - x)
+      
+      # Create Group Masks
+      idx_bot <- curr_s <= cut_low
+      idx_top <- curr_s >= cut_high
+      idx_mid <- curr_s > cut_low & curr_s < cut_high
+      
+      # --- Branch: Wilcoxon ---
+      if (test_method == "wilcox") {
+         if (!is.null(covariates)) stop("Wilcoxon test cannot adjust for covariates. Use 'lm'.")
+         
+         grp_mid <- curr_y[idx_mid]
+         
+         # 1. Bottom vs Mid
+         if (sum(idx_bot) >= 3 && sum(idx_mid) >= 3) {
+           w <- wilcox.test(curr_y[idx_bot], grp_mid)
+           stats_bot[i] <- abs(qnorm(w$p.value / 2))
+         }
+         # 2. Top vs Mid
+         if (sum(idx_top) >= 3 && sum(idx_mid) >= 3) {
+           w <- wilcox.test(curr_y[idx_top], grp_mid)
+           stats_top[i] <- abs(qnorm(w$p.value / 2))
+         }
+         # 3. Top vs Bottom (New)
+         if (sum(idx_top) >= 3 && sum(idx_bot) >= 3) {
+           w <- wilcox.test(curr_y[idx_top], curr_y[idx_bot])
+           stats_tvb[i] <- abs(qnorm(w$p.value / 2))
+         }
+      
+      # --- Branch: Linear Regression ---
+      } else if (test_method == "lm") {
+        
+        # 1. Bottom (1) vs Middle (0)
+        valid_bm <- idx_bot | idx_mid
+        if (sum(idx_bot) >= 3 && sum(idx_mid) >= 3) {
+          sub_y <- curr_y[valid_bm]
+          sub_covs <- curr_covs[valid_bm, , drop = FALSE]
+          sub_group <- as.numeric(idx_bot[valid_bm])
+          
+          lm_data <- bind_cols(y = sub_y, group = sub_group, sub_covs)
+          mod <- lm(y ~ ., data = lm_data)
+          stats_bot[i] <- abs(summary(mod)$coefficients["group", "t value"])
+        }
+        
+        # 2. Top (1) vs Middle (0)
+        valid_tm <- idx_top | idx_mid
+        if (sum(idx_top) >= 3 && sum(idx_mid) >= 3) {
+          sub_y <- curr_y[valid_tm]
+          sub_covs <- curr_covs[valid_tm, , drop = FALSE]
+          sub_group <- as.numeric(idx_top[valid_tm])
+          
+          lm_data <- bind_cols(y = sub_y, group = sub_group, sub_covs)
+          mod <- lm(y ~ ., data = lm_data)
+          stats_top[i] <- abs(summary(mod)$coefficients["group", "t value"])
+        }
+        
+        # 3. Top (1) vs Bottom (0) (New)
+        valid_tvb <- idx_top | idx_bot
+        if (sum(idx_top) >= 3 && sum(idx_bot) >= 3) {
+          sub_y <- curr_y[valid_tvb]
+          sub_covs <- curr_covs[valid_tvb, , drop = FALSE]
+          sub_group <- as.numeric(idx_top[valid_tvb]) # 1=Top, 0=Bottom
+          
+          lm_data <- bind_cols(y = sub_y, group = sub_group, sub_covs)
+          mod <- lm(y ~ ., data = lm_data)
+          stats_tvb[i] <- abs(summary(mod)$coefficients["group", "t value"])
+        }
+      }
+    }
+    
+    # Return Max Stats for all 3 comparisons
+    list(max_bot = max(stats_bot, na.rm = TRUE),
+         best_x_bot = probs[which.max(stats_bot)],
+         max_top = max(stats_top, na.rm = TRUE),
+         best_x_top = probs[which.max(stats_top)],
+         max_tvb = max(stats_tvb, na.rm = TRUE),
+         best_x_tvb = probs[which.max(stats_tvb)])
+  }
+  
+  # 2. Observed Stats
+  obs <- get_max_stats(y_vec, s_vec, cov_df)
+  
+  # 3. Permutation Loop
+  null_stats <- map_dfr(1:n_perms, function(i) {
+    s_shuffled <- sample(s_vec)
+    res <- get_max_stats(y_vec, s_shuffled, cov_df)
+    tibble(max_bot = res$max_bot, 
+           max_top = res$max_top,
+           max_tvb = res$max_tvb)
+  })
+  
+  # 4. P-values
+  p_val_bot <- mean(null_stats$max_bot >= obs$max_bot)
+  p_val_top <- mean(null_stats$max_top >= obs$max_top)
+  p_val_tvb <- mean(null_stats$max_tvb >= obs$max_tvb)
+  
+  # 5. Final Output
+  tibble(
+    pheno = pheno_col,
+    test_used = test_method,
+    scan_type = c("Bottom x% vs Middle", "Top x% vs Middle", "Top x% vs Bottom x%"),
+    optimal_quantile_x = c(obs$best_x_bot, obs$best_x_top, obs$best_x_tvb),
+    max_statistic = c(obs$max_bot, obs$max_top, obs$max_tvb),
+    corrected_p_value = c(p_val_bot, p_val_top, p_val_tvb),
+    significance = if_else(c(p_val_bot, p_val_top, p_val_tvb) < 0.05, "Significant", "NS")
+  )
+}
+```
+
+```{r}
+#Run double thresholding over sarcomere positive individuals with Wilcoxon
+# sarcpos_double_thresh <- map(phenos_of_interest, ~run_permutation_scan(sarcpos, .x)) %>% bind_rows()
+# print(sarcpos_double_thresh)
+# write_tsv(sarcpos_double_thresh, 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/4_DoubleThresh_Perm/sarcpos/sarcpos_double_thresholds_wilcox.tsv')
+```
+
+```{r}
+#Repeat for sarcomere-negative individuals
+# sarcneg_double_thresh <- map(phenos_of_interest, ~run_permutation_scan(sarcneg, .x)) %>% bind_rows()
+# print(sarcneg_double_thresh)
+# write_tsv(sarcneg_double_thresh, 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/4_DoubleThresh_Perm/sarcneg/sarcneg_double_thresholds_wilcox.tsv')
+```
+
+Now run with linear regression with age/sex + bsa (if wallthkmax) covariates instead.
+
+```{r}
+#Run double thresholding over sarcomere positive individuals with lm
+sarcpos_double_thresh_lm <- map(c('lvmassi'), ~run_permutation_scan(sarcpos, .x, covariates=c('age','sex'), test_method = 'lm')) %>% bind_rows() %>% mutate(adj_p = p.adjust(corrected_p_value, method='fdr'))
+print(sarcpos_double_thresh_lm, n=nrow(sarcpos_double_thresh_lm))
+write_tsv(sarcpos_double_thresh_lm, 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/4_DoubleThresh_Perm/sarcpos/sarcpos_double_thresholds_lm.tsv')
+# sarcpos_double_thresh_lm <- read_tsv('genetic_subset_analysis/PRS/3_output/1_Endophenotype/4_DoubleThresh_Perm/sarcpos/sarcpos_double_thresholds_lm.tsv')
+```
+
+```{r}
+#Repeat for sarcomere-negative individuals with lm
+sarcneg_double_thresh_lm <- map(c('lvmassi','wallthkmax','lge_total','lvs_eccmean'), ~run_permutation_scan(sarcneg, .x, covariates=c('age','sex'), test_method = 'lm')) %>% bind_rows() %>% mutate(adj_p = p.adjust(corrected_p_value, method='fdr'))
+print(sarcneg_double_thresh_lm, n=nrow(sarcneg_double_thresh_lm))
+write_tsv(sarcneg_double_thresh_lm, 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/4_DoubleThresh_Perm/sarcneg/sarcneg_double_thresholds_lm.tsv')
+# sarcneg_double_thresh_lm <- read_tsv('genetic_subset_analysis/PRS/3_output/1_Endophenotype/4_DoubleThresh_Perm/sarcneg/sarcneg_double_thresholds_lm.tsv')
+```
+
+```{r}
+#This plots a summary plot using a quantile_thresholder_summary_plotter which takes in the input summary_tb for either sarcpos or sarcneg and then plots a scatter with -log10(adjusted_p_value) vs. max_statistic (for double threshold) or statistic (for maxstat single threshold). Have different shapes for the scan_type (for double_threshold) and colour by the phenotype. Use the same colour scheme as summary_plotter.
+
+quantile_thresholder_summary_plotter <- function(
+  summary_tb,
+  output_path,
+  title_suffix = "",
+  label_tb_path = "output/data/combo_labels.tsv",
+  x_var = c("max_statistic", "statistic")
+) {
+  x_var <- match.arg(x_var)
+
+  if(!'adj_p' %in% colnames(summary_tb)){
+    summary_tb <- mutate(summary_tb, adj_p = p.adjust(p_value, method='fdr'))
+  }
+
+  if(!'scan_type' %in% colnames(summary_tb)){
+    summary_tb <- mutate(summary_tb, scan_type = 'Maxstat Single Threshold')
+  }
+
+  label_tb <- read_tsv(label_tb_path)
+  label_tb$Label[label_tb$Variable=='ecvfwhole'] <- 'Whole LV ECVF (based on 3 slices) (%)'
+  label_tb$Label[label_tb$Variable=='lge_total'] <- 'Total LGE Mass Over All Segments (g)'
+  label_tb$Label[label_tb$Variable=='lvs_ellmean'] <- '-Longitudinal Systolic LV Strain - Mean (%)'
+  label_tb$Label[label_tb$Variable=='lvs_eccmean'] <- '-Circumferential Systolic LV Strain - Mean (%)'
+  label_tb$Label[label_tb$Variable=='lvs_errmean'] <- 'Radial Systolic LV Strain - Mean (%)'
+
+  summary_tb <- summary_tb |>
+    left_join(select(label_tb, Variable, Label, Palette), by = c("pheno" = "Variable"))
+
+  col_palette <- if (length(unique(summary_tb$Label)) <= 8) "Set2" else "Paired"
+
+  summary_tb <- summary_tb |>
+    mutate(
+      Label = as.factor(Label),
+      scan_type = as.factor(scan_type)
+    )
+
+  summary_tb <- mutate(summary_tb, text_label = ifelse(significance =='Significant',pheno,''))
+
+  if (!x_var %in% names(summary_tb)) {
+    stop(glue::glue("`x_var` = '{x_var}' not found in `summary_tb`. Available columns: {toString(names(summary_tb))}"))
+  }
+
+  x_lab <- dplyr::case_when(
+    x_var == "max_statistic" ~ "Maximum Test Statistic",
+    x_var == "statistic" ~ "Test Statistic",
+    TRUE ~ x_var
+  )
+
+  p <- ggplot(
+    summary_tb,
+    aes(x = .data[[x_var]], y = -log10(adj_p), colour = Label, shape = scan_type)
+  ) +
+    geom_point(size = 2) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +
+    geom_text_repel(aes(label=text_label), force=5)+
+    scale_colour_brewer(palette = col_palette) +
+    scale_shape_manual(values = c(16, 17, 15)) +
+    labs(
+      title = paste("Quantile Threshold Scan Summary", title_suffix),
+      x = x_lab,
+      y = "-log10(Adjusted P-value)",
+      colour = "Phenotype",
+      shape = "Scan Type"
+    )
+
+  print(p)
+
+  ggsave(
+    filename = file.path(output_path, "quantile_threshold_scan_summary_plot.png"),
+    plot = p,
+    height = 6,
+    width = 9
+  )
+}
+```
+
+```{r}
+#Plot for the double thresh
+quantile_thresholder_summary_plotter(sarcpos_double_thresh_lm, 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/4_DoubleThresh_Perm/sarcpos/', title_suffix='(Sarcomere Positive Individuals)',x_var='max_statistic')
+quantile_thresholder_summary_plotter(sarcneg_double_thresh_lm, 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/4_DoubleThresh_Perm/sarcneg/', title_suffix='(Sarcomere Negative Individuals)',x_var='max_statistic')
+```
+```{r}
+#Plot for the single thresh
+quantile_thresholder_summary_plotter(sarcpos_binary_maxstat_thresh, 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/3_Maxstat/sarcpos/', title_suffix='(Sarcomere Positive Individuals)', x_var='statistic')
+quantile_thresholder_summary_plotter(sarcneg_binary_maxstat_thresh, 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/3_Maxstat/sarcneg/', title_suffix='(Sarcomere Negative Individuals)', x_var='statistic')
+```
+# Archive
+
+This computes the quantile at which there is a significant Wilcoxon rank sum test difference in endophenotype between bottom x% and top 1-x% e.g bottom 80% vs. top 20%.
+
+
+```{r}
+#Function which computes the quantile at which there is a nominally significant Wilcoxon rank sum test difference in endophenotype between bottom x% and top 1-x% given input_tb and pheno_of_interest
+
+significant_quantile_threshold <- function(
+  input_tb,
+  pheno_of_interest,
+  quantiles = seq(0.05, 0.95, by = 0.01),
+  prs_col = "cv_prs",
+  min_n_per_group = 10,
+  padj_method='fdr'
+) {
+  stopifnot(pheno_of_interest %in% names(input_tb))
+  stopifnot(prs_col %in% names(input_tb))
+
+  df <- input_tb |>
+  select(all_of(c(prs_col, pheno_of_interest))) |>
+  filter(!is.na(.data[[prs_col]]), !is.na(.data[[pheno_of_interest]]))
+
+  map_dfr(quantiles, function(q) {
+    low <- quantile(df[[prs_col]], probs = q, na.rm = TRUE, names = FALSE)
+    high <- quantile(df[[prs_col]], probs = 1-q, na.rm = TRUE, names = FALSE)
+
+    low_grp <- df |>
+      filter(.data[[prs_col]] <= low) |>
+      pull(all_of(pheno_of_interest))
+
+    high_grp <- df |>
+      filter(.data[[prs_col]] >= high) |>
+      pull(all_of(pheno_of_interest))
+
+    mid_grp <- df |>
+      filter(.data[[prs_col]] < high, .data[[prs_col]] > low) |>
+      pull(all_of(pheno_of_interest))
+
+    n_low <- length(low_grp)
+    n_mid <- length(mid_grp)
+    n_high <- length(high_grp)
+
+    if (n_low < min_n_per_group || n_high < min_n_per_group || n_mid < min_n_per_group  ) {
+      return(tibble(
+        pheno = pheno_of_interest,
+        quantile = q,
+        low_prs_thresh = low,
+        high_prs_thresh = high,
+        n_low = n_low,
+        n_high = n_high,
+        n_mid = n_mid,
+        pval = NA_real_
+      ))
+    }
+
+    p <- wilcox.test(low_grp, high_grp)$p.value
+
+    tibble(
+      pheno = pheno_of_interest,
+      quantile = q,
+      low_prs_thresh = low,
+      high_prs_thresh = high,
+      n_low = n_low,
+      n_high = n_high,
+      n_mid = n_mid,
+      pval = p
+    ) 
+    })
+}
+
+# Optional helper: returns the smallest quantile with significant difference 
+first_significant_quantile <- function(result_tb) {
+  result_tb |>
+  filter(padj < 0.05) |>
+  slice_min(order_by = quantile, n = 1, with_ties = FALSE)
+}
+
+
+```
+
+
+```{r}
+# Run for sarcomere positive individuals
+sarcpos_endo_thresh <- map(phenos_of_interest, ~significant_quantile_threshold(sarcpos,.))
+names(sarcpos_endo_thresh) <- phenos_of_interest
+
+#Look at LVMi because it passed LM
+View(sarcpos_endo_thresh[['lvmassi']])
+```
+
+
+```{r}
+# Run for sarcomere positive individuals
+sarcneg_endo_thresh <- map(phenos_of_interest, ~significant_quantile_threshold(sarcneg,.))
+names(sarcneg_endo_thresh) <- phenos_of_interest
+
+View(sarcneg_endo_thresh[['lvmassi']])
+```

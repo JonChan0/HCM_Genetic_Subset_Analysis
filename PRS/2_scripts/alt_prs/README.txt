@@ -1,0 +1,1 @@
+This refers to the training and generation of alternative PRSs than HCM susceptibility PRSs for association with endophenotype/severity.

@@ -1,0 +1,620 @@
+---
+title: "Comparison of HCMR Case Rare-Variant Carriers on Endophenotype - Sensitivity"
+author: "Jonathan Chan"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide   
+---
+
+```{r}
+library(tidyverse)
+rm(list=ls())
+
+source('genetic_subset_analysis/common/hcmr_endophenotype_functions.R')
+```
+
+# Sensitivity Analysis
+
+## Echo Measures Sensitivity Analysis
+
+I also perform further sensitivity analysis by performing the same comparisons using echocardiography (as opposed to CMR)-derived measures of the same phenotypes.
+This includes the measures of 
+
+* Echomax = maximal diastolic LV wall thickness
+* Echoef = LV ejection fraction
+
+This only runs on the pairwise comparisons of the Thick vs. Thin and MYBPC3 vs. MYH7 because those have MTC-significant signals at the CMR level.
+
+```{r import, echo=F}
+#Import in the total_df_notransform from EDA_HCMR.Rmd
+hcmr_ids_of_interest <- read_tsv('genetic_subset_analysis/common/output/data/hcmr_agesex_rare_filtered_2558.tsv')
+hcmr_tb <- readRDS('output/data/total_notransform_nogenofilter_df.rds') %>% #I use the 2750 -> filtered for those who have HCR IDs (2677) (i.e. without filtering for hard-called genotypes)
+  distinct()
+
+
+hcmr_tb <- hcmr_tb %>%
+  filter(HCR_IDs %in% hcmr_ids_of_interest$HCR_IDs) #Now filter to those individuals of interest
+
+falsepositive_mybpc3_vus_individuals <- readRDS('genetic_subset_analysis/common/falsepositive_mybpc3_vus_individuals.rds')
+hcmr_tb <- hcmr_tb %>%
+  mutate(sarcomere = ifelse(HCR_IDs %in% falsepositive_mybpc3_vus_individuals , FALSE, sarcomere)) #MYBPC3-VUS individuals incorrectly classified as sarcomere-positive
+
+rm(hcmr_ids_of_interest)
+
+pergene_rarevar_classification <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class.tsv')
+pergene_perpatho_rarevar_classification <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class_plp_vusfpvus.tsv')
+
+
+phenos_of_interest <- c('echomax','echoef')
+contphenos <- phenos_of_interest
+
+continuous_param_list <- list(
+  c('echomax','Max LV Wall Thickness - Echo (mm)'),
+  c('echoef','Left ventricular Ejection Fraction - Echo (%)')
+)
+names(continuous_param_list) <- map_chr(continuous_param_list, ~.[[1]])
+
+label_tb <- read_tsv('output/data/combo_labels_20260123.tsv')
+```
+
+```{r phenotype_tb}
+hcmr_sarcpos_tb <- hcmr_tb %>%
+  filter(sarcomere==T) #Filter to only sarcomere-positive individuals
+
+#Build the phenotype tibble, combining the two rare variant classifications into the same tibble
+hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>%
+  left_join(select(pergene_rarevar_classification,HCR_ID, class_primary=class), by=c('HCR_IDs'='HCR_ID')) %>%
+  left_join(select(pergene_perpatho_rarevar_classification,HCR_ID, class_secondary=class), by=c('HCR_IDs'='HCR_ID'))
+
+#Build the initial tb for all sarc_positive individuals = 915
+hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>%
+  select(HCR_IDs,age,sex=gender,bsa, bmi, sarcomere, class_primary, class_secondary,
+         all_of(phenos_of_interest))
+
+#Only apply this filtering step to the hcmr_sarcpos_tb
+hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>% 
+    filter(if_any(contphenos, negate(is.na))) #Filter out all individuals who have NA values for all 6 continuous phenotypes = 915-882 = 33 individuals removed
+
+hcmr_sarcpos_tb_notransform <- hcmr_sarcpos_tb
+hcmr_sarcpos_tb <- inverse_rank_transformer(hcmr_sarcpos_tb, contphenos) # Rank-based inverse normalisation of all endophenotypes
+
+rm(hcmr_tb)
+```
+
+```{r}
+#This code generates the comparison lists
+#For primary classification comparisons
+#For thick vs. thin (excluding ACTC1 from Thin btw)
+thick_class <- unique(hcmr_sarcpos_tb$class_primary)[!str_detect(unique(hcmr_sarcpos_tb$class_primary),'ACTC1|TPM1|TNNI3|TNNT2') & str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3|MYH7|MYL2|MYL3')]
+thin_class <- unique(hcmr_sarcpos_tb$class_primary)[str_detect(unique(hcmr_sarcpos_tb$class_primary),'TPM1|TNNI3|TNNT2') & !str_detect(unique(hcmr_sarcpos_tb$class_primary),'ACTC1|MYBPC3|MYH7|MYL2|MYL3')]
+
+#For mybpc3 vs. MYH7
+mybpc3_class <- unique(hcmr_sarcpos_tb$class_primary)[str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3') & !str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYH7')]
+myh7_class <- unique(hcmr_sarcpos_tb$class_primary)[str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYH7') & !str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3')]
+#---------------------------------------------------------------------------------------
+#Parameter lists for each comparison
+thick_thin_param_list <- list(thick_class, 'Thick',thin_class, 'Thin')
+mybpc3_myh7_param_list <- list(mybpc3_class, 'MYBPC3',myh7_class,'MYH7')
+
+rm(list=ls(pattern='class$'))
+```
+
+```{r}
+#These are with the transformed phenotype_tb
+temp <- map(list(thick_thin_param_list,mybpc3_myh7_param_list),~comparison_pheno_tb_gen(phenotype_tb = hcmr_sarcpos_tb, param_list=.,rarevar_class_tb = pergene_rarevar_classification, var_class='primary'))
+names(temp) <- c('thick_thin_tb','mybc3_myh7_tb')
+comparison_tbs <- c(temp)
+rm(temp)
+
+#These are with the nontransformed phenotype_tb
+temp <- map(list(thick_thin_param_list,mybpc3_myh7_param_list),~comparison_pheno_tb_gen(phenotype_tb = hcmr_sarcpos_tb_notransform, param_list=.,rarevar_class_tb = pergene_rarevar_classification, var_class='primary'))
+names(temp) <- c('thick_thin_tb','mybc3_myh7_tb')
+comparison_tbs_notransform <- c(temp)
+rm(temp)
+
+
+lm_results_list <- list(
+  map(continuous_param_list, ~linear_logistic_regression_modeller(comparison_tbs[[1]], .,'Thick','Thin', covars=c('age','sex','bmi'))) %>% bind_rows(),
+  map(continuous_param_list, ~linear_logistic_regression_modeller(comparison_tbs[[2]], .,'MYBPC3', 'MYH7', covars=c('age','sex','bmi'))) %>% bind_rows()
+)
+
+cont_lm_summary_tb <- bind_rows(lm_results_list) %>%
+  mutate(comparison = str_c(group1, ' vs. ', group2)) %>%
+  left_join(select(label_tb,Variable, Label),by=c('pheno'='Variable')) %>%
+  mutate(estimate = - estimate) %>% #Invert the estimate to reflect group1 vs. group2 
+  select(-term) %>%
+  mutate(Label_short = case_when(
+    pheno == 'echomax' ~ 'maxLVWT_Echo',
+    pheno == 'echoef' ~ 'LVEF_Echo',
+  )) %>%
+    mutate(Label_short = str_c(Label_short, ' (', comparison,')'))
+
+#Makes the label reflect the normalisation
+cont_lm_summary_tb <- mutate(cont_lm_summary_tb, Label= ifelse(pheno %in% contphenos, str_replace(Label, '\\([^ ]+\\)$', '(SD)'), Label))
+
+rm(lm_results_list)
+
+#This is for publication
+summary_plotter(cont_lm_summary_tb,output_path='genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/Echo/', mtc='fdr',confint=T, poster=T, test='LinearRegression',xlabel='Coefficient Estimate', height=4, width=6)
+```
+
+I also extend the meta-analysis for the significant findings from the comparisons of Echo-derived features i.e
+
+Thick > echomax than thin.
+MYBPC3 > echomax but < echoef than MYH7.
+
+```{r echo_meta}
+comparisons_echo <- read_excel('genetic_subset_analysis/RareVar/1_input//PriorComparisons.xlsx', sheet='Echo_Sensitivity') 
+
+thick_vs_thin_hcmr <- hcmr_significant_results_grabber(comparison_tbs_notransform[[1]],'Thick','Thin',c('echomax','echoef')) 
+mybpc3_vs_myh7_hcmr <- hcmr_significant_results_grabber(comparison_tbs_notransform[[2]],'MYBPC3','MYH7',c('echomax','echoef'))
+
+#Overall with both the prior publications and with the HCMR summary statistics
+comparisons_echo <- full_join(comparisons_echo, bind_rows(thick_vs_thin_hcmr, mybpc3_vs_myh7_hcmr))
+
+
+thick_vs_thin_echomax <- meta_cont_from_tb(comparisons_echo , 'echomax','Thick','Thin',plot_output_path = 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/3_Meta/MD/Echo/')
+thick_vs_thin_echoef <- meta_cont_from_tb(comparisons_echo , 'echoef','Thick','Thin',plot_output_path = 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/3_Meta/MD/Echo/')
+
+mybpc3_vs_myh7_echomax<- meta_cont_from_tb(comparisons_echo , 'echomax','MYBPC3','MYH7',plot_output_path = 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/3_Meta/MD/Echo/')
+mybpc3_vs_myh7_echoef <- meta_cont_from_tb(comparisons_echo , 'echoef','MYBPC3','MYH7',plot_output_path = 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/3_Meta/MD/Echo/')
+
+rm(list=ls(pattern='thick_vs_thin|mybpc3_vs_myh7'))
+```
+
+
+```{r echo_meta_sensitivity}
+#Sensitivity analyses for echo meta-analysis
+sensitivity_output_path <- 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/3_Meta/MD/Echo/sensitivity/1_RE/'
+thick_vs_thin_echomax <- meta_cont_from_tb(comparisons_echo , 'echomax','Thick','Thin',random=T,plot_output_path =sensitivity_output_path )
+mybpc3_vs_myh7_echomax <- meta_cont_from_tb(comparisons_echo , 'echomax','MYBPC3','MYH7',random=T,plot_output_path =sensitivity_output_path )
+
+
+sensitivity_output_path <- 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/3_Meta/MD/Echo/sensitivity/2_LOO_RE/'
+mybpc3_vs_myh7_echomax <- meta_cont_from_tb(comparisons_echo , 'echomax','MYBPC3','MYH7',random=T,excluded_studies=c('Tran Vu et al, 2019'),plot_output_path =sensitivity_output_path )
+
+rm(list=ls(pattern='thick_vs_thin|mybpc3_vs_myh7|plp_vs_vusfpvus'))
+```
+
+
+## ACTC1 in Thick Vs. Thin 
+
+I repeat analyses but with ACTC1 in the Thick vs. Thin comparison.
+
+```{r}
+comparison_gen(phenotype_tb,phenotype_tb2,include_actc1=T) #Creates the necessary global vectors by taking in phenotype 1 and phenotype2 and classified hcr_ids and generating the classes in each comparison
+
+comparison_tbs <- map(list(thick_thin_param_list,mybpc3_plof_nonlof_param_list,mybpc3_myh7_param_list),~comparison_pheno_tb_gen(phenotype_tb = phenotype_tb, param_list=.,pergene_rarevar_classification_tb = pergene_rarevar_classification, 'tb1'))
+names(comparison_tbs) <- c('thick_thin_tb','mybpc3_plof_nonlof_tb','mybc3_myh7_tb')
+
+comparison_tb2 <- map(list(p_lp_vus_vusfp_param_list),~comparison_pheno_tb_gen(phenotype_tb = phenotype_tb2, param_list=.,pergene_rarevar_classification_tb = pergene_rarevar_classification2, 'tb2'))
+names(comparison_tb2) <- c('p_lp_vus_vusfp_tb')
+
+rm(thick_thin_param_list,mybpc3_myh7_param_list,mybpc3_plof_nonlof_param_list, p_lp_vus_vusfp_param_list)
+rm(list=ls(pattern='_class$'))
+
+thick_vs_thin_cont_results <- map(continuous_param_list,plot_tester, input_tb=comparison_tbs[[1]],group1_name='Thick', group2_name='Thin', output_path='genetic_subset_analysis/RareVar/3_output/plots/4_SENSITIVITY_INCLUDE_ACTC1_THIN/thick_thin') %>% bind_rows()
+
+mybpc3_plof_vs_mybpc3_nonlof_cont_results <- map(continuous_param_list,plot_tester, input_tb=comparison_tbs[[2]],group1_name='MYBPC3_pLOF', group2_name='MYBPC3_nonLOF', output_path='genetic_subset_analysis/RareVar/3_output/plots/4_SENSITIVITY_INCLUDE_ACTC1_THIN/mybpc3_plof_nonlof') %>% bind_rows()
+
+mybpc3_vs_myh7_cont_results <- map(continuous_param_list,plot_tester, input_tb=comparison_tbs[[3]],group1_name='MYBPC3', group2_name='MYH7', output_path='genetic_subset_analysis/RareVar/3_output/plots/4_SENSITIVITY_INCLUDE_ACTC1_THIN/mybpc3_myh7')%>% bind_rows()
+
+plp_vs_vusfpvus_cont_results <- map(continuous_param_list,plot_tester, input_tb=comparison_tb2[[1]],group1_name='P/LP', group2_name='VUS', output_path='genetic_subset_analysis/RareVar/3_output/plots/4_SENSITIVITY_INCLUDE_ACTC1_THIN/p_lp_vs_vusfp_vus')%>% bind_rows()
+
+label_tb <- readRDS('output/data/combo_labels.rds') 
+label_tb$Label[label_tb$Variable=='ecvfwhole'] <- 'Whole LV ECVF (based on 3 slices) (%)'
+
+cont_test_summary_tb <- bind_rows(thick_vs_thin_cont_results,mybpc3_plof_vs_mybpc3_nonlof_cont_results,mybpc3_vs_myh7_cont_results,plp_vs_vusfpvus_cont_results)
+rm(thick_vs_thin_cont_results,mybpc3_plof_vs_mybpc3_nonlof_cont_results,mybpc3_vs_myh7_cont_results,plp_vs_vusfpvus_cont_results,sarcpos_vs_neg_cont_results)
+
+all_stat_test_summary_tb <- cont_test_summary_tb %>%
+  mutate(comparison = str_c(group1, ' vs. ', group2)) %>%
+  left_join(select(label_tb,Variable, Label),by=c('pheno'='Variable'))%>%
+  mutate(Label = case_when(pheno=='Morphology' ~'Morphology',
+                           pheno=='lge_total_bin' ~ 'Total LGE Over All Segments (6 SD) Bins (%)',
+                           T~Label))
+         
+plot_tb <- all_stat_test_summary_tb %>%
+  filter(!pheno %in% c('Morphology', 'lge_total_bin')) %>% #Only looking at continuous traits
+  filter(!comparison == 'Sarc Positive vs. Sarc Negative') #Ignore sarcomere comparison
+
+#Makes the label reflect the normalisation
+plot_tb$Label[plot_tb$pheno=='lge_total'] <- 'Total LGE over All Segments (6 SD) (RI Normalised) (SD)'
+
+summary_plotter(plot_tb,  output_path='genetic_subset_analysis/RareVar/3_output/plots/4_SENSITIVITY_INCLUDE_ACTC1_THIN/summary_plots/',label=T)
+summary_plotter(plot_tb, pval='fdr',output_path='genetic_subset_analysis/RareVar/3_output/plots/4_SENSITIVITY_INCLUDE_ACTC1_THIN/summary_plots/', label=T)
+summary_plotter(plot_tb, pval='fdr', output_path='genetic_subset_analysis/RareVar/3_output/plots/4_SENSITIVITY_INCLUDE_ACTC1_THIN/summary_plots/',confint=T, label=T)
+
+lm_results_list <- list(
+  map(continuous_param_list, ~linear_logistic_regression_modeller(comparison_tbs[[1]], .,'Thick','Thin')) %>% bind_rows(),
+  map(continuous_param_list, ~linear_logistic_regression_modeller(comparison_tbs[[2]], .,group1_name='MYBPC3_pLOF', group2_name='MYBPC3_nonLOF',)) %>% bind_rows(),
+  map(continuous_param_list, ~linear_logistic_regression_modeller(comparison_tbs[[3]], .,group1_name='MYBPC3', group2_name='MYH7',)) %>% bind_rows(),
+  map(continuous_param_list,~linear_logistic_regression_modeller(comparison_tb2[[1]], .,group1_name='P/LP', group2_name='VUS'))%>% bind_rows()
+)
+
+cont_lm_summary_tb <- bind_rows(lm_results_list) %>%
+  mutate(comparison = str_c(group1, ' vs. ', group2)) %>%
+  left_join(select(label_tb,Variable, Label),by=c('pheno'='Variable')) %>%
+  mutate(estimate=-estimate,
+         lowerSE=estimate-SE,upperSE=estimate+SE) #Reverse the estimate sign to obtain the coefficient for Group1
+cont_lm_summary_tb$Label[cont_lm_summary_tb$pheno=='lge_total'] <- 'Total LGE over All Segments (6 SD) (RI Normalised) (SD)'
+
+rm(lm_results_list)
+
+summary_plotter(cont_lm_summary_tb,output_path='genetic_subset_analysis/RareVar/3_output/plots/4_SENSITIVITY_INCLUDE_ACTC1_THIN/summary_plots/lm/', test='LinearRegression',xlabel='Coefficient Estimate for Group1')
+summary_plotter(cont_lm_summary_tb,output_path='genetic_subset_analysis/RareVar/3_output/plots/4_SENSITIVITY_INCLUDE_ACTC1_THIN/summary_plots/lm/', pval='fdr',test='LinearRegression',xlabel='Coefficient Estimate for Group1')
+summary_plotter(cont_lm_summary_tb,output_path='genetic_subset_analysis/RareVar/3_output/plots/4_SENSITIVITY_INCLUDE_ACTC1_THIN/summary_plots/lm/', pval='fdr',test='LinearRegression',xlabel='Coefficient Estimate for Group1',se=T)
+```
+
+## Supplementary Analysis: P/LP Homozygotes + P/LP Compound Heterozygotes
+
+I also investigate the particular multiple-variant individuals who are either homozygotes for a P/LP variant or are compound heterozygotes for 2x P/LP variants.
+
+```{r supp_analysis_multivariant}
+homozygotes_plp <- all_merged_overlapvars_tb %>% 
+  filter(dosage1==2 | dosage2==2) %>%
+  filter(Curation1 %in% c('P','LP'))
+
+multi_het_plp <- all_merged_overlapvars_tb %>%
+  filter(!is.na(dosage2)) %>%
+  filter(Curation1 %in% c('P','LP') & Curation2 %in% c('P','LP'))
+
+write_csv(filter(phenotype_tb_multidosage, HCR_ID %in% homozygotes_plp$HCR_ID), 'genetic_subset_analysis/RareVar/3_output/summary_tbs/homo_plp_cmrpheno.csv')
+write_csv(filter(phenotype_tb_multidosage, HCR_ID %in% multi_het_plp$HCR_ID), 'genetic_subset_analysis/RareVar/3_output/summary_tbs/compoundhet_plp_cmrpheno.csv')
+
+```
+## Revision of Pathogenicity-Based Comparison Approach
+
+I compare the CMR phenotypes across the 3x groups of 
+1) Sarcomere-positive P/LP
+2) Sarcomere-positive VUS i.e 'hot VUS'
+3) Sarcomere-negative VUS i.e 'cold VUS'
+
+For this I first import in the outputs from hcmr_rarevar_classifier.R which acts on the sarcomere-negative individuals.
+
+```{r sarcneg_import}
+#Import in the _class.tsv files 
+basepath <- 'genetic_subset_analysis/RareVar/3_output/individual_class/sarcneg/'
+full_filenames <- list.files(basepath, pattern="class.tsv", full.names=TRUE)
+filenames <- list.files(basepath, pattern='class.tsv')
+
+class_dosage_list <- map(str_c(basepath,filenames,sep='/'), tsv_importer)
+
+all_merged_tb_sarcneg <- bind_rows(class_dosage_list)
+rm(class_dosage_list)
+
+#Repeat for the class2.tsv which has the bins of P/LP or VUS/VUS_FP for each gene
+basepath <- 'genetic_subset_analysis/RareVar/3_output/individual_class/sarcneg/'
+full_filenames <- list.files(basepath, pattern="class2.tsv", full.names=TRUE)
+filenames <- list.files(basepath, pattern='class2.tsv')
+
+class2_dosage_list <- map(str_c(basepath,filenames,sep='/'), tsv_importer)
+
+all_merged_tb2_sarcneg <- bind_rows(class2_dosage_list)
+rm(class2_dosage_list)
+
+#Repeating for the overlap_variants
+basepath <- 'genetic_subset_analysis/RareVar/3_output/individual_class/sarcneg/overlap_variants'
+full_filenames <- list.files(basepath, pattern="_class.tsv", full.names=TRUE)
+filenames <- list.files(basepath, pattern='_class.tsv')
+
+class_dosage_list <- map(str_c(basepath,filenames,sep='/'), tsv_importer_overlapvars)
+
+all_merged_overlapvars_tb_sarcneg <- bind_rows(class_dosage_list)
+all_merged_overlapvars_tb_sarcneg <- all_merged_overlapvars_tb_sarcneg %>%
+    pivot_longer(5:ncol(all_merged_overlapvars_tb_sarcneg),names_to='HCR_ID',values_to='dosage') %>%
+  filter(!is.na(dosage))
+
+#Make all merged overlapvars_tb have one row per individual and then many columns for Var1; Dosage1; Var2; Dosage 2 etc.
+# Add a column for rare variant number
+all_merged_overlapvars_tb_sarcneg$variant_number <- ave(rep(1, nrow(all_merged_overlapvars_tb_sarcneg)), all_merged_overlapvars_tb_sarcneg$HCR_ID, FUN = seq_along)
+
+# Pivot the tibble wider
+all_merged_overlapvars_tb_sarcneg <- all_merged_overlapvars_tb_sarcneg  %>%
+  select(-SYMBOL) %>%
+  pivot_wider(names_from = variant_number, 
+              names_glue = "{.value}{variant_number}",
+              values_from = c(Variant, Consequence, Curation, dosage)) %>%
+  select(HCR_ID, ends_with('1'), ends_with('2'), ends_with('3'))
+
+rm(basepath, full_filenames, filenames, class_dosage_list)
+
+write_tsv(all_merged_overlapvars_tb_sarcneg, 'genetic_subset_analysis/RareVar/3_output/individual_class/sarcneg/overlap_variants/hcmr_sarcneg_KT_overlapvariants.tsv')
+
+```
+
+Then, I perform some QC:
+
+1 Check 'false positives' sheet in the HCMR_final_AH.xlsx which may refer to 'sarcomere-negative' individuals who have false-positive result 
+2) Filter out those who are NA for their 'sarcomere' label in the hcmr_tb
+3) I check for those with P/LP/VUS_FP variants which might have been mislabelled as sarcomere-negative
+
+```{r sarcneg_qc}
+false_positives_ktah <- read_excel('genetic_subset_analysis/RareVar/1_input//HCMR_final_AH_150319.xlsx',sheet='False positives')
+colnames(false_positives_ktah) <- c('HCR_ID','Variant')
+
+falsepos_overlapvars <- all_merged_overlapvars_tb_sarcneg %>%
+  filter(HCR_ID %in% false_positives_ktah$HCR_ID) %>%
+  left_join(false_positives_ktah, by='HCR_ID')
+
+print(str_c('Of ',length(unique(false_positives_ktah$HCR_ID)), ' individuals reported as false positives by KT and AH, ', length(unique(falsepos_overlapvars$HCR_ID)), ' are found in these sarcomere-negative individuals who apparently have variants in KT/AH list'))
+
+print(str_c('There are originally ', sum(all_merged_overlapvars_tb_sarcneg$Curation1 %in% c('P','LP'),
+                                         all_merged_overlapvars_tb_sarcneg$Curation2 %in% c('P','LP')), ' patients labelled as sarcomere-negative who have variants labelled as P or LP by KT and AH'))
+
+alltbs_sarcneg <- map(list(all_merged_tb_sarcneg, all_merged_tb2_sarcneg, all_merged_overlapvars_tb_sarcneg),
+                      ~filter(.,!HCR_ID %in% false_positives_ktah$HCR_ID))
+
+print(str_c('After filtering out false positives as per OG spreadsheet, there are now ', sum(alltbs_sarcneg[[3]]$Curation1 %in% c('P','LP'),alltbs_sarcneg[[3]]$Curation2 %in% c('P','LP')), ' patients labelled as sarcomere-negative who have variants labelled as P or LP by KT and AH'))
+
+rm(list=ls(pattern='all_merged'))
+
+alltbs_sarcneg <- map(alltbs_sarcneg,
+                      ~filter(.,!HCR_ID %in% filter(hcmr_tb,is.na(sarcomere))$HCR_IDs))
+
+print(str_c('After filtering out false positives as per OG spreadsheet AND removing those who are NA in sarcomere label in fulldataset, there are now ', sum(alltbs_sarcneg[[3]]$Curation1 %in% c('P','LP'),alltbs_sarcneg[[3]]$Curation2 %in% c('P','LP')), ' patients labelled as sarcomere-negative who have variants labelled as P or LP by KT and AH'))
+
+rm(falsepos_overlapvars, false_positives_ktah)
+```
+I also check the following for QC
+
+4) I check for those with multiple dosage of 'cold' VUSs and filter down to those with single-dosage (for comparison with the single-dosage individuals in phenotype_tb2 i.e single-variant 'sarcomere-positive' individuals)
+
+```{r multidosage_sarcneg_qc}
+homozygotes_sarcneg <- alltbs_sarcneg[[3]]%>% 
+  filter(dosage1==2 | dosage2==2) #There are 2 homozygotes for MYBPC3 VUS variants who are 'sarcomere-negative'
+
+multi_het_sarcneg <- alltbs_sarcneg[[3]]%>%
+  filter(!is.na(dosage2)) #There are 7 compound heterozygotes
+
+print(str_c('There are', nrow(homozygotes_sarcneg), 'homozygotes and',length(unique(multi_het_sarcneg$HCR_ID)),'multiple heterozygotes with ', length(intersect(homozygotes_sarcneg$HCR_ID, multi_het_sarcneg$HCR_ID)),'individual being both so technically',nrow(homozygotes_sarcneg)+length(unique(multi_het_sarcneg$HCR_ID))-length(intersect(homozygotes_sarcneg$HCR_ID, multi_het_sarcneg$HCR_ID)), 'individuals with >1 dose of a rare variant', sep=' '))
+
+#These are all the individuals with >1 dosage of rare variant
+multi_dosage_ids_sarcneg <- unique(c(homozygotes_sarcneg$HCR_ID,multi_het_sarcneg$HCR_ID))
+
+alltbs_sarcneg <- map(alltbs_sarcneg,
+                      ~filter(.,!HCR_ID %in% multi_dosage_ids_sarcneg))
+
+print(str_c('There are', length(unique(alltbs_sarcneg[[1]]$HCR_ID)),'unique single-variant sarcomere-negative individuals who have a cold VUS', sep=' '))
+
+rm(homozygotes_sarcneg, multi_het_sarcneg)
+```
+
+Then I append their dosages to their CMR phenotype information.
+
+```{r redo_pathogenicity_import}
+pergene_rarevar_classification2_sarcneg <- rare_variant_classifier(alltbs_sarcneg[[2]])
+
+sarc_neg_total_df_notransform <- hcmr_tb %>%
+  filter(sarcomere==0)
+
+#Build the phenotype tb for all sarc_negative individuals
+sarc_neg_total_df_notransform <- sarc_neg_total_df_notransform %>%
+  select(HCR_IDs,age,sex=gender,bsa,
+         wallthkmax, lvmassi, lge_total, ecvfwhole, lvef, lvs_ellmean, lvs_eccmean, lvs_errmean, Morphology) #Define your phenotypes of interest here
+
+phenotype_tb2_sarcneg <- pheno_tb_builder(pergene_rarevar_classification2_sarcneg, sarc_neg_total_df_notransform)%>% #This is with the per-gene rare variant dosage broken down to P/LP or VUS as well (so the secondary analysis)
+  #log_transformer('lvmassi') %>%
+  inverse_rank_transformer(c('lge_total'#,'ecvfwhole'
+                             ))%>% #Filter out all individuals who have NA values for all 6 continuous phenotypes
+  filter(if_any(c(wallthkmax, lvmassi, lge_total, ecvfwhole, lvef, lvs_ellmean, lvs_eccmean, lvs_errmean), negate(is.na)))
+
+rm(alltbs_sarcneg)
+
+```
+Then I combine into a single tb for comparison with the 'sarcomere-positive' P/LP and VUS individuals.
+
+```{r}
+
+phenotype_tb_sarcpos_sarcneg <- bind_rows(mutate(phenotype_tb2_sarcneg, Morphology=as.character(Morphology)), 
+                                          mutate(phenotype_tb2, Morphology=as.character(Morphology))%>% filter(!HCR_ID %in% multi_dosage_ids)) %>% #Also filters out multiple-dosage individuals from phenotype_tb
+  mutate(group=case_when(str_detect(class,'P_LP')~ 'P/LP',
+                         str_detect(class, 'VUS_FP')~ 'VUS_Sarc+',
+                         str_detect(class,'(?!.*FP)_VUS$')~'VUS_Sarc-')) 
+
+
+```
+
+
+### Kruskal-Wallis Test for Comparison
+
+Then I compare via Kruskal-Wallis test.
+
+```{r}
+plot_tester_multigroup <- function(input_tb,input_param_vector,output_path, continuous_or_discrete='continuous'){
+  
+  phenotype_colname <- input_param_vector[1]
+  xlabel<- input_param_vector[2]
+  
+  plot_tb <- input_tb %>%
+    filter(!is.na(eval(parse(text=phenotype_colname)))) %>% #Filter out NA values for that phenotype
+    filter(!is.na(group)) #Filter our NA values for the group for comparisons
+  
+  if(continuous_or_discrete == 'continuous'){
+    kruskal_results <- kruskal.test(plot_tb[[phenotype_colname]], plot_tb$group)
+      
+      plot <- ggplot(plot_tb)+
+        geom_density(aes(x=eval(parse(text=phenotype_colname)), fill=group),alpha=0.3)+
+        xlab(xlabel)+
+        ylab('Density')+
+        labs(title=str_wrap(str_c('Distribution of',xlabel,'for rare variant carrier subgroups of ',str_c(unique(plot_tb$group),collapse='; '),sep=' '),width=60),
+             caption=str_c('Nominal Kruskal-Wallis rank sum p-value = ', as.character(signif(kruskal_results$p.value, digits=4))))+
+        labs(fill='Group')
+      
+      print(plot)
+      ggsave(str_c(output_path,'/',str_c(str_c(unique(plot_tb$group),collapse='_ '),phenotype_colname,'density_plot.png',sep='_')),dpi=600)
+      
+      output_kruskal_wallis <- tribble(
+        ~pheno, ~groups, ~pval,
+        phenotype_colname, str_c(unique(plot_tb$group),collapse='| '), kruskal_results$p.value,
+      )
+      return(output_kruskal_wallis)
+    
+  } else if (continuous_or_discrete == 'discrete'){
+      contingency_table <- table(plot_tb$group, plot_tb[[phenotype_colname]])
+      
+      # Check which columns have all elements greater than 10 so only include categorical values if cell size > 10 for each of the 2x comparison groups
+      keep_cols <- apply(contingency_table, 2, function(x) all(x > 10))
+      filtered_table <- contingency_table[, keep_cols]
+      print(filtered_table)
+      
+      chisq_results <- chisq.test(filtered_table)
+      
+      heatmap_plot <- ggplot(plot_tb, aes(x=group, y=eval(parse(text=phenotype_colname))))+
+        geom_bin2d()+
+        stat_bin2d(geom='text',aes(label=..count..),col='white')+
+        scale_fill_viridis(name='Count')+
+        xlab('Group')+
+        ylab(xlabel)+
+        labs(title=str_wrap(str_c('Heatmap of',xlabel,'for rare variant carrier subgroups of ',str_c(unique(plot_tb$group),collapse='; '),sep=' '),width=60),
+           caption=str_c('Nominal Chi-squared sum p-value (post-filtering for groups with n>10 in both cells) = ', as.character(signif(chisq_results$p.value, digits=4))))
+
+      print(heatmap_plot)
+      ggsave(str_c(output_path,'/',str_c(str_c(unique(plot_tb$group),collapse='_ '),phenotype_colname,'density_plot.png',sep='_')),dpi=600, width=10, height=6)
+      
+      output_chisq_test <- tribble(
+      ~pheno, ~groups, ~pval,
+      phenotype_colname, str_c(unique(plot_tb$group),collapse='| '), chisq_results$p.value
+    )
+      return(output_chisq_test)
+    
+  }
+  
+}
+pathogenicity_comp_redo_kw <- map(continuous_param_list,
+                               ~plot_tester_multigroup(phenotype_tb_sarcpos_sarcneg,., output_path='genetic_subset_analysis/RareVar/3_output/plots/7_PATHO_REDO/1_PLP_SARC+VUS_SARC-VUS' )) %>% bind_rows()
+
+write_tsv(pathogenicity_comp_redo_kw,'genetic_subset_analysis/RareVar/3_output/plots/7_PATHO_REDO/1_PLP_SARC+VUS_SARC-VUS/kw_summary.tsv'  )
+rm(pathogenicity_comp_redo_kw)
+```
+### Multivariate Linear Regression 
+Then I perform multivariate linear regression with the group variable, using the P/LP as the baseline group to correct for confounders such as age/sex.
+
+```{r}
+linear_logistic_regression_modeller_multigroup <- function(input_tb, input_param_vector, continuous_or_discrete='continuous', model_return=F, summary_print=T){
+  
+  pheno_of_interest <- input_param_vector[[1]]
+  
+  if (pheno_of_interest %in% c('wallthkmax','echomax')){ #Add more phenotypes where you want to include BSA as a covariate here
+    bsa_covariate <- T
+  } else{
+    bsa_covariate <- F
+  }
+  
+  plot_tb <- input_tb %>%
+    mutate(group = factor(group))
+  
+  if (isTRUE(bsa_covariate)){
+      formula <- str_c(pheno_of_interest, '~ age + sex + bsa + group')
+  } else{
+    formula <- str_c(pheno_of_interest, '~ age + sex + group')
+  }
+  
+  if (continuous_or_discrete =='continuous'){
+    model <- lm(formula, data=plot_tb, na.action='na.omit')
+  } else if (continuous_or_discrete == 'discrete'){
+    model <- glm(formula, family = 'binomial',data=plot_tb, na.action='na.omit')
+  }
+  
+  print(str_c('Phenotype tested for association with',str_c(unique(plot_tb$group),collapse='; '), 'subgroups is ',input_param_vector[[2]], sep=' '))
+  
+  if(isTRUE(summary_print)){
+      print(summary(model))
+  }
+
+  
+  pvals <- summary(model)$coefficients
+  adjusted_rsq <- summary(model)$adj.r.squared
+  
+  output_tb <- as_tibble(pvals) %>%
+    mutate(variable = row.names(pvals)) %>%
+    mutate(pheno = pheno_of_interest ) %>%
+    select(pheno,variable, everything())
+  
+  colnames(output_tb) <- c('pheno','variable','estimate','SE','tval','pval')
+  
+  output_tb <- select(output_tb, -tval)
+  
+  # output_tb <- tribble(
+  #    ~pheno, ~group, ~pval, ~estimate, ~SE,
+  #   pheno_of_interest, pvals[nrow(pvals),3], pvals[nrow(pvals),4], pvals[nrow(pvals),1],pvals[nrow(pvals),2] #Only output the pvalue and coefficient estimate for the phenotype of interest
+  # )
+  
+  if (isTRUE(model_return)){
+    return(model)
+  } else{
+    return(output_tb)
+  }
+    
+}
+
+pathogenicity_comp_redo_linreg <- map(continuous_param_list,
+                               ~linear_logistic_regression_modeller_multigroup(phenotype_tb_sarcpos_sarcneg,.)) %>% bind_rows() %>%
+  filter(!variable %in% c('(Intercept)','age','sexFemale','bsa') ) %>%
+  mutate(variable = str_match(variable,'group(.+)')[,2])
+```
+
+Summary plotting for the linear regression with multigroup.
+
+```{r}
+pathogenicity_comp_redo_linreg <- pathogenicity_comp_redo_linreg %>%
+    mutate(comparison = str_c(variable, ' vs. P/LP')) %>%
+  left_join(select(label_tb,Variable, Label),by=c('pheno'='Variable')) %>%
+    mutate(lowerSE=estimate-SE,upperSE=estimate+SE) 
+pathogenicity_comp_redo_linreg$Label[pathogenicity_comp_redo_linreg$pheno=='lge_total'] <- 'Total LGE over All Segments (6 SD) (RI Normalised) (SD)'
+  
+patho_redo_output_path <- 'genetic_subset_analysis/RareVar/3_output/plots/7_PATHO_REDO/1_PLP_SARC+VUS_SARC-VUS/summary_plots/lm/'
+
+summary_plotter(pathogenicity_comp_redo_linreg, patho_redo_output_path,label=T, test='LinearRegression', xlabel='Coefficient Estimate for Group Relative to P/LP Group')
+summary_plotter(pathogenicity_comp_redo_linreg, patho_redo_output_path,label=T, test='LinearRegression', xlabel='Coefficient Estimate for Group Relative to P/LP Group',pval='fdr')
+summary_plotter(pathogenicity_comp_redo_linreg, patho_redo_output_path,label=F, test='LinearRegression', xlabel='Coefficient Estimate for Group Relative to P/LP Group',pval='fdr',se=T)
+
+write_tsv(pathogenicity_comp_redo_linreg, str_c(patho_redo_output_path,'cont_summary_tb.tsv'))
+rm(pathogenicity_comp_redo_linreg, patho_redo_output_path)
+
+```
+### Sensitivity P/LP vs. VUS
+
+```{r}
+#Also do for just P/LP vs. all VUS (2-group comparison)
+pheno_tb_plp_vs_vus_redo <- phenotype_tb_sarcpos_sarcneg %>%
+  mutate(group=case_when(str_detect(class, 'P_LP')~'P/LP',
+                         str_detect(class, 'VUS') ~ 'VUS_SARC+-',
+                         T~NA))
+
+pathogenicity_comp_sensitivity_redo_wilcox <- map(continuous_param_list,
+                               ~plot_tester(pheno_tb_plp_vs_vus_redo,.,group1_name='P/LP', group2_name='VUS_SARC+-', output_path='genetic_subset_analysis/RareVar/3_output/plots/7_PATHO_REDO/2_PLP_VUS' )) %>% bind_rows()
+
+pathogenicity_comp_sensitivity_redo_wilcox <- pathogenicity_comp_sensitivity_redo_wilcox %>%
+  mutate(comparison = str_c(group1, ' vs. ', group2)) %>%
+  left_join(select(label_tb,Variable, Label),by=c('pheno'='Variable'))%>%
+  mutate(Label = case_when(pheno=='Morphology' ~'Morphology',
+                           pheno=='lge_total_bin' ~ 'Total LGE Over All Segments (6 SD) Bins (%)',
+                           T~Label))
+
+#Makes the label reflect the normalisation
+pathogenicity_comp_sensitivity_redo_wilcox$Label[pathogenicity_comp_sensitivity_redo_wilcox$pheno=='lge_total'] <- 'Total LGE over All Segments (6 SD) (RI Normalised) (SD)'
+
+path_comp_sens_redo_output_path <- 'genetic_subset_analysis/RareVar/3_output/plots/7_PATHO_REDO/2_PLP_VUS/summary_plots/'
+#Summary plotting for Wilcoxon Rank Sum test
+summary_plotter(pathogenicity_comp_sensitivity_redo_wilcox, label=T, output_path= path_comp_sens_redo_output_path)
+summary_plotter(pathogenicity_comp_sensitivity_redo_wilcox, pval='fdr', label=T, output_path= path_comp_sens_redo_output_path)
+summary_plotter(pathogenicity_comp_sensitivity_redo_wilcox, pval='fdr', confint=T, label=T, output_path= path_comp_sens_redo_output_path)
+
+#Multivariate linear regression
+pathogenicity_comp_sensitivity_redo_lm <- map(continuous_param_list,
+                                              ~linear_logistic_regression_modeller(pheno_tb_plp_vs_vus_redo,.,
+                                              group1_name='P/LP',group2_name='VUS_SARC+-')) %>% bind_rows()
+
+pathogenicity_comp_sensitivity_redo_lm <- pathogenicity_comp_sensitivity_redo_lm %>%
+  mutate(comparison = str_c(group1, ' vs. ', group2)) %>%
+  left_join(select(label_tb,Variable, Label),by=c('pheno'='Variable')) %>%
+  mutate(estimate=-estimate,
+         lowerSE=estimate-SE,upperSE=estimate+SE) #Reverse the estimate sign to obtain the coefficient for Group1
+pathogenicity_comp_sensitivity_redo_lm$Label[pathogenicity_comp_sensitivity_redo_lm$pheno=='lge_total'] <- 'Total LGE over All Segments (6 SD) (RI Normalised) (SD)'
+
+summary_plotter(pathogenicity_comp_sensitivity_redo_lm,output_path=str_c(path_comp_sens_redo_output_path,'lm/'), test='LinearRegression',xlabel='Coefficient Estimate for Group1',label=T)
+summary_plotter(pathogenicity_comp_sensitivity_redo_lm,output_path=str_c(path_comp_sens_redo_output_path,'lm/'), pval='fdr',test='LinearRegression',xlabel='Coefficient Estimate for Group1',label=T)
+summary_plotter(pathogenicity_comp_sensitivity_redo_lm,output_path=str_c(path_comp_sens_redo_output_path,'lm/'), pval='fdr',test='LinearRegression',xlabel='Coefficient Estimate for Group1',se=T)
+```

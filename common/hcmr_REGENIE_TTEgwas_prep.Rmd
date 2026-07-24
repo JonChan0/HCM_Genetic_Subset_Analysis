@@ -1,0 +1,140 @@
+---
+title: "Pre of REGENIE Files for HCMR TTE GWAS "
+author: "Jonathan Chan"
+date: "2026-02-03"
+output: 
+  html_document:
+    code_folding: hide   
+---
+
+```{r}
+library(tidyverse)
+rm(list = ls())
+source('genetic_subset_analysis/common/hcmr_outcomes_functions.R')
+```
+
+# Import 
+
+This imports in the outcomes data.
+
+```{r}
+primary_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_primary_outcome_df_2445.rds')
+secondary_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_secondary_outcome_df_2445.rds')
+hf_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_hf_outcome_df_2445.rds')
+va_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_va_outcome_df_2445.rds')
+af_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_af_outcome_df_2445.rds')
+stroke_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_stroke_outcome_df_2445.rds')
+
+#Add in the HCMR PRS scores (this is with the minimac-r2-filter for INFO 0.3-1.0) and computed with the intersectvars with UKB
+hcmr_prs <- read_tsv('genetic_subset_analysis/PRS/1_input/hcmr_imputedvars_prs.sscore')
+
+hcmr_pcs <- read_delim('popgen/2_gwas/data/hcmr/HCMR_HARDCALLS/pcs_hcmr_10pcs')
+
+#Add in the rare variant class as P_LP or VUS or sarcomere-negative
+hcmr_rarevar_class <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class_plp_vusfpvus.tsv') %>%
+    select(HCR_IDs=HCR_ID, rarevar_class=class) %>%
+    mutate(sarcomere_binned = case_when(
+      str_detect(rarevar_class,'_P_LP$') ~ 'P_LP', #So multiple variant individuals are assigned to P_LP if they have one
+      str_detect(rarevar_class, 'VUS_FP_VUS') ~ 'VUS',
+      TRUE ~ 'Sarcomere-negative'
+    ))
+
+covars <- c('bmi','cmrdiabp') #Only use BMI in reality due to missing values in DBP
+outcome_vars <- c('hcmdt','event','event_date','event_indicator','event_or_censoring_date','time_to_event_or_censoring_years','age_at_event_or_censoring')
+
+```
+
+This merges with the phenotype data.
+
+```{r}
+sarcall <- map(list(primary_outcomes_df, secondary_outcomes_df, hf_outcomes_df, va_outcomes_df, af_outcomes_df, stroke_outcomes_df), ~ data_preprocessor(.,  hcmr_rarevar_class, c(covars, outcome_vars), sarcomere_status=c(T,F), hcmr_pcs=hcmr_pcs, hcmr_prs=hcmr_prs))
+
+names(sarcall) <- c('primary', 'secondary', 'hf', 'va', 'af', 'stroke')
+
+rm(primary_outcomes_df, secondary_outcomes_df, af_outcomes_df, hf_outcomes_df, stroke_outcomes_df, va_outcomes_df,hcmr_prs, hcmr_rarevar_class, hcmr_pcs)
+```
+
+# Output
+
+This outputs the REGENIE pheno and covar files.
+
+```{r}
+cov_tb <- select(sarcall[[1]],HCR_IDs:hcmdt, cv_prs:PC10) %>% #This is the base covariates for output in the covar tb
+    mutate(FID=HCR_IDs, IID=HCR_IDs) %>%
+    select(FID, IID, everything(), -HCR_IDs)
+
+print(colnames(cov_tb))
+
+write_tsv(cov_tb, 'genetic_subset_analysis/PRS/2_scripts/TTE_GWAS/1_input/regenie_hcmr_covar.tsv')
+```
+
+```{r}
+sarcall_selected <- map2(
+  sarcall,
+  names(sarcall),
+  ~ select(
+      .x,
+      HCR_IDs,
+      event_indicator,
+      time_to_event_or_censoring_years,
+      age_at_event_or_censoring
+    ) |>
+    rename_with(
+      .fn = \(nm) str_c(nm, "_", .y),
+      .cols = c(
+        "event_indicator",
+        "time_to_event_or_censoring_years",
+        "age_at_event_or_censoring"
+      )
+    )
+)
+
+pheno_tb <- reduce(sarcall_selected, left_join, by = "HCR_IDs") %>%
+    mutate(FID=HCR_IDs, IID=HCR_IDs) %>%
+    select(FID, IID, everything(), -HCR_IDs)
+
+rm(sarcall, sarcall_selected)
+
+write_tsv(pheno_tb, 'genetic_subset_analysis/PRS/2_scripts/TTE_GWAS/1_input/regenie_hcmr_pheno.tsv')
+```
+
+
+```{r}
+#Check if there are any 0 or <0 values in time_to_event columns in pheno_tb
+time_to_event_cols <- colnames(pheno_tb)[str_detect(colnames(pheno_tb), 'time_to_event_or_censoring_years')]
+for (col in time_to_event_cols) {
+  num_zero_or_negative <- sum(pheno_tb[[col]] <= 0, na.rm = TRUE)
+  if (num_zero_or_negative > 0) {
+    cat(paste("Column", col, "has", num_zero_or_negative, "entries with time to event <= 0.\n"))
+  } else {
+    cat(paste("Column", col, "has no entries with time to event <= 0.\n"))
+  }
+}
+
+#And likewise with age_at_event_or_censoring columns
+age_at_event_cols <- colnames(pheno_tb)[str_detect(colnames(pheno_tb), 'age_at_event_or_censoring')]
+for (col in age_at_event_cols) {
+  num_zero_or_negative <- sum(pheno_tb[[col]] <= 0, na.rm = TRUE)
+  if (num_zero_or_negative > 0) {
+    cat(paste("Column", col, "has", num_zero_or_negative, "entries with age at event <= 0.\n"))
+  } else {
+    cat(paste("Column", col, "has no entries with age at event <= 0.\n"))
+  }
+}
+
+rm(time_to_event_cols, age_at_event_cols)
+```
+
+
+```{r}
+#Remove rows with <= 0 time_to_event_or_censoring_years
+pheno_tb <- pheno_tb %>%
+  filter(across(starts_with("time_to_event_or_censoring_years"), ~ . > 0, .names = "valid_{col}"))
+
+cov_tb <- cov_tb %>%
+  filter(FID %in% pheno_tb$FID)
+
+#Write out the filtered pheno file
+write_tsv(pheno_tb, 'genetic_subset_analysis/PRS/2_scripts/TTE_GWAS/1_input/regenie_hcmr_pheno_timenon0filtered.tsv')
+write_tsv(cov_tb, 'genetic_subset_analysis/PRS/2_scripts/TTE_GWAS/1_input/regenie_hcmr_covar_timenon0filtered.tsv')
+```

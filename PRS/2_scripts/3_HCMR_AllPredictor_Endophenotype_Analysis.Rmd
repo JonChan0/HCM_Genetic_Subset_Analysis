@@ -1,0 +1,934 @@
+---
+title: "Joint Modelling of All Predictors vs Endophenotypes in HCMR"
+author: "Jonathan Chan"
+date: "2026-06-02"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(viridis)
+library(tictoc)
+library(kableExtra)
+library(readxl)
+library(ggrepel)
+library(patchwork)
+library(gtsummary)
+
+rm(list=ls())
+
+theme_set(theme_classic(base_size=14))
+source('genetic_subset_analysis/common/hcmr_endophenotype_functions.R')
+```
+
+# Overview
+
+This script mirrors the endophenotype-association analysis in `1_HCMR_PRS_Endophenotype_Analysis.Rmd` but, instead of focusing on the PRS and sarcomere status alone, it fits a **single joint linear model per endophenotype** that additionally includes the clinical risk factors (CRFs) and plasma proteins as predictors:
+
+- The HCM **PRS** (`cv_prs`, per-SD)
+- **Sarcomere status** (positive vs negative)
+- **Clinical risk factors**: BMI, DBP, smoking (ever vs never) and the prior-history binary flags
+- **Plasma proteins**: NT-proBNP and Troponin T (`TnTStat`)
+
+Age, sex, MRI field strength and the first 3 genetic PCs (plus BSA for wall thickness) are included only as adjustment covariates and are **not** reported. Each endophenotype is standardised to SD units so the effect sizes are comparable.
+Outputs are (1) a forest plot of every reported predictor for each endophenotype with significance stars and (2) a volcano-style summary scatter plot of every predictor x endophenotype comparison.
+
+# Import
+
+This imports the HCMR data after preprocessing (identical inputs to script 1).
+
+```{r}
+total_df_notransform <- readRDS('output/data/total_notransform_nogenofilter_df.rds')
+
+#Use the 2446 individuals
+hcmr_ids <- read_tsv('genetic_subset_analysis/common/output/data/hcmr_agesex_rare_common_filtered_2446.tsv')
+
+#Convert false positive individuals to sarcomere-negative individuals (due to false positive MYBPC3-VUS variants)
+falsepositive_mybpc3_vus_individuals <- readRDS('genetic_subset_analysis/common/falsepositive_mybpc3_vus_individuals.rds')
+total_df_notransform <- total_df_notransform %>%
+  filter(HCR_IDs %in% hcmr_ids$HCR_IDs) %>% #Filter to 2446
+  mutate(sarcomere = ifelse(HCR_IDs %in% falsepositive_mybpc3_vus_individuals, FALSE, sarcomere))
+rm(hcmr_ids)
+
+#Add in the HCMR PRS scores (this is with the minimac-r2-filter for INFO 0.3-1.0) and computed with the intersectvars with UKB
+hcmr_prs <- read_tsv('genetic_subset_analysis/PRS/1_input/hcmr_imputedvars_prs.sscore')
+
+# Add in the HCMR PCs which were derived from flashPCA2 from the HCMR hard-called genotypes
+hcmr_pcs <- read_delim('popgen/2_gwas/data/hcmr/HCMR_HARDCALLS/pcs_hcmr_10pcs')
+
+#---- Predictors -------------------------------------------------------------
+#Clinical risk factors (column name -> display label)
+crf_labels <- c(
+  'bmi'      = 'BMI (per SD)',
+  'cmrdiabp' = 'DBP (per SD)',
+  'smoking'  = 'Smoking (ever)',
+  'hxscd'    = 'Prev. SCD',
+  'hxafib'   = 'Prev. AF',
+  'hxvt'     = 'Prev. VT',
+  'hxhf'     = 'Prev. HF',
+  'hxstrk'   = 'Prev. Stroke',
+  'diatyp2'  = 'Prev. T2D',
+  'blcp'     = 'Prev. Chest Pain',
+  'bldysp'   = 'Prev. Dyspnea',
+  'hxsync'   = 'Prev. Syncope'
+)
+crfs <- names(crf_labels)
+
+#Plasma proteins (column name -> display label)
+protein_labels <- c('NTproBNP' = 'NTproBNP (per SD log-scale)', 'TnTStat' = 'Troponin T (per SD log-scale)')
+proteins <- names(protein_labels)
+
+#Continuous predictors standardised per-SD; proteins are heavily skewed so log1p first
+cont_predictors <- c('bmi','cmrdiabp')
+binary_crfs     <- setdiff(crfs, cont_predictors) #prior-history + smoking 0/1 flags, left on the native scale (hxafib/hxvt/smoking recoded to 0/1 in preprocessing)
+
+#Predictors reported in the figures (everything except age/sex/3PCs/BSA)
+extra_predictors <- c('sarcomere', crfs, proteins)        #reported alongside cv_prs
+reported_predictors <- c('cv_prs', extra_predictors)
+
+#Endophenotypes of interest (column -> human label), mirroring script 1
+continuous_param_list <- list(
+  c('wallthkmax','Maximal LV Wall Thickness (mm)'),
+  c('lvmassi','LV Mass Index (g/m2)'),
+  c('lge_total','LV LGE Mass/ LV Mass (%)'),
+  c('ecvfwhole','LV Extracellular Volume Fraction (%)'),
+  c('lvef','LV Ejection Fraction (%)'),
+  c('lvs_ellmean','-Longitudinal LV Strain'),
+  c('lvs_eccmean','-Circumferential LV Strain'),
+  c('lvs_errmean','Radial LV Strain')
+)
+endophenos <- map_chr(continuous_param_list, 1)
+
+#Lookup tables for relabelling / colouring
+pheno_labels <- tibble(
+  pheno = endophenos,
+  Label = map_chr(continuous_param_list, 2),
+  Label_short = c('maxLVWT','LVMi','LGE','ECVF','LVEF','-LongStrain','-CircStrain','RadStrain')
+)
+
+predictor_label_map <- c('cv_prs' = 'PRS (per SD)', 'sarcomere' = 'Sarcomere-positive',
+                         crf_labels, protein_labels)
+
+#Display order (y-axis) for the forest plot: PRS, Sarcomere, proteins, continuous CRFs, then binary CRFs
+predictor_order <- c('PRS (per SD)','Sarcomere-positive',
+                     protein_labels[['NTproBNP']], protein_labels[['TnTStat']],
+                     crf_labels[['bmi']], crf_labels[['cmrdiabp']],
+                     crf_labels[binary_crfs])
+
+#Assign each predictor to a category for colouring
+group_of <- function(t){
+  case_when(
+    t == 'cv_prs'    ~ 'PRS',
+    t == 'sarcomere' ~ 'Sarcomere',
+    t %in% proteins  ~ 'Plasma Protein',
+    TRUE             ~ 'Clinical Risk Factor'
+  )
+}
+```
+
+## Investigating the discordant sarcomere associations (maxLVWT vs LVMi)
+
+The joint model gives sarcomere-positive status a **positive** effect on maximal wall thickness
+(`wallthkmax`) but a **negative** effect on LV mass index (`lvmassi`), even though `wallthkmax` and
+`lvmassi` are positively correlated overall.
+
+A BSA-indexing artefact was the first hypothesis but is **ruled out**: the discordance is already present
+in the *raw* values — sarcomere-positive patients have **higher** maximal wall thickness yet **lower**
+LV mass (both indexed *and* unindexed) — and adjusting for age/sex/BSA does **not** flip either sign.
+So the effect is real, not an artefact of indexing or the covariate set.
+
+The remaining explanation is **morphological**: sarcomeric HCM is characteristically **focal/asymmetric**
+hypertrophy — a single segment (typically septal) is very thick, driving up `wallthkmax`, while the
+*total* myocardial mass stays lower (smaller cavity, less of the global/concentric remodelling seen in
+the predominantly older, hypertensive sarcomere-negative group). `wallthkmax` captures the single
+thickest segment (a *focal* measure) whereas `lvmassi` captures *global* mass, so sarcomere status pushes
+the two in opposite directions even though they are positively correlated population-wide.
+
+This block decomposes the paradox with four diagnostic panels:
+(1) the joint scatter with per-group regression lines and group-stratified Spearman correlations
+(sarcomere-positive should sit **down-and-right** — thicker peak wall at lower mass);
+(2) the raw marginal distribution of each phenotype by sarcomere status (the discordance pre-adjustment);
+(3) the sarcomere effect on each (SD-standardised) phenotype **unadjusted vs adjusted** for age/sex/BSA,
+confirming the signs are stable (no indexing/covariate flip); and
+(4) a **focality index** — peak wall thickness per unit LV mass — which should be **higher** in
+sarcomere-positive if hypertrophy is concentrated focally rather than spread globally.
+
+```{r sarcomere_discordance, fig.width=12, fig.height=11}
+invest_dir <- 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/allpredictor/sarcomere_discordance/'
+dir.create(invest_dir, recursive = TRUE, showWarnings = FALSE)
+
+#Covariates available at this point (PCs/proteins not yet joined); BSA is the key indexing covariate
+adj_covars_invest <- intersect(c('age','gender','bsa'), names(total_df_notransform))
+
+invest_df <- total_df_notransform %>%
+  mutate(sarc = factor(ifelse(sarcomere, 'Positive', 'Negative'), levels = c('Negative','Positive'))) %>%
+  filter(!is.na(wallthkmax), !is.na(lvmassi))
+
+sarc_pal <- c('Negative' = 'grey55', 'Positive' = '#D55E00')
+
+#--- (1) Joint scatter + per-group regression lines, with stratified Spearman -------------------
+overall_cor <- cor(invest_df$wallthkmax, invest_df$lvmassi, method = 'spearman', use = 'pairwise.complete.obs')
+print(overall_cor)
+strat_cor <- invest_df %>%
+  group_by(sarc) %>%
+  summarise(rho = cor(wallthkmax, lvmassi, method = 'spearman', use = 'pairwise.complete.obs'),
+            n = sum(is.finite(wallthkmax) & is.finite(lvmassi)), .groups = 'drop')
+print(strat_cor)  #Spearman correlation within each sarcomere group
+
+cor_subtitle <- str_glue('Overall Spearman ρ = {round(overall_cor,2)}  |  ',
+                         'Neg ρ = {round(strat_cor$rho[strat_cor$sarc=="Negative"],2)}, ',
+                         'Pos ρ = {round(strat_cor$rho[strat_cor$sarc=="Positive"],2)}')
+
+p_scatter <- ggplot(invest_df, aes(wallthkmax, lvmassi, colour = sarc)) +
+  geom_point(alpha = 0.22, size = 1) +
+  geom_smooth(method = 'lm', se = TRUE, linewidth = 1) +
+  scale_colour_manual(values = sarc_pal) +
+  labs(title = 'maxLVWT vs LVMi by sarcomere status', subtitle = cor_subtitle,
+       x = 'Maximal LV Wall Thickness (mm)', y = 'LV Mass Index (g/m2)', colour = 'Sarcomere')
+
+#--- (2) Raw marginal distribution of each phenotype by sarcomere -------------------------------
+#Wilcoxon rank-sum (Pos vs Neg) for each phenotype, surfaced in the subtitle
+marg_p <- c(
+  wallthkmax = wilcox.test(wallthkmax ~ sarc, data = invest_df)$p.value,
+  lvmassi    = wilcox.test(lvmassi  ~ sarc, data = invest_df)$p.value
+)
+marg_subtitle <- str_glue('Wilcoxon Pos vs Neg — maxLVWT p = {signif(marg_p[["wallthkmax"]], 2)}; ',
+                          'LVMi p = {signif(marg_p[["lvmassi"]], 2)}')
+
+p_marg <- invest_df %>%
+  select(sarc, wallthkmax, lvmassi) %>%
+  pivot_longer(c(wallthkmax, lvmassi), names_to = 'pheno', values_to = 'value') %>%
+  mutate(pheno = recode(pheno,
+                        wallthkmax = 'Maximal LV Wall Thickness (mm)',
+                        lvmassi    = 'LV Mass Index (g/m2)')) %>%
+  ggplot(aes(sarc, value, fill = sarc)) +
+  geom_violin(alpha = 0.4, trim = TRUE) +
+  geom_boxplot(width = 0.15, outlier.size = 0.4, alpha = 0.7) +
+  facet_wrap(~ pheno, scales = 'free_y') +
+  scale_fill_manual(values = sarc_pal) +
+  labs(title = 'Raw marginal distributions by sarcomere status', subtitle = marg_subtitle,
+       x = NULL, y = 'Raw value', fill = 'Sarcomere') +
+  theme(legend.position = 'none')
+
+#--- (3) Sarcomere effect: unadjusted vs adjusted vs +Morphology (SD-standardised outcomes) -----
+#Direct test of the focal mechanism: if LV morphology mediates the discordance, adding Morphology as
+#a covariate should attenuate the sarcomere-positive effect on BOTH maxLVWT and LVMi toward zero.
+std <- function(x) as.numeric(scale(x))
+invest_std <- invest_df %>%
+  mutate(across(c(wallthkmax, lvmassi), std),
+         Morphology = factor(as.character(Morphology)))
+
+adj_lab  <- str_glue('Adjusted ({paste(adj_covars_invest, collapse="+")})')
+morph_lab <- str_glue('{adj_lab} + Morphology')
+
+sarc_contrast <- function(y){
+  raw   <- lm(reformulate('sarc', y), data = invest_std)
+  adj   <- lm(reformulate(c('sarc', adj_covars_invest), y), data = invest_std)
+  morph <- lm(reformulate(c('sarc', adj_covars_invest, 'Morphology'), y), data = invest_std)
+  pull_beta <- function(m, model){
+    co <- summary(m)$coefficients['sarcPositive', ]
+    tibble(pheno = y, model = model, beta = co['Estimate'], se = co['Std. Error'], n = nobs(m))
+  }
+  bind_rows(pull_beta(raw, 'Unadjusted'),
+            pull_beta(adj, adj_lab),
+            pull_beta(morph, morph_lab))
+}
+
+contrasts <- map_dfr(c('wallthkmax','lvmassi'), sarc_contrast) %>%
+  mutate(lo = beta - 1.96*se, hi = beta + 1.96*se,
+         pheno = recode(pheno, wallthkmax = 'maxLVWT', lvmassi = 'LVMi'),
+         model = factor(model, levels = c('Unadjusted', adj_lab, morph_lab)))
+print(contrasts)  #sarcomere-positive beta (SD) per model; expect attenuation toward 0 with Morphology
+
+p_contrast <- ggplot(contrasts, aes(beta, pheno, colour = model)) +
+  geom_vline(xintercept = 0, linetype = 'dashed', colour = 'grey50') +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.2, position = position_dodge(width = 0.5)) +
+  geom_point(size = 2.5, position = position_dodge(width = 0.5)) +
+  scale_colour_manual(values = c('#0072B2', '#D55E00', '#009E73')) +
+  labs(title = 'Sarcomere-positive effect: unadjusted vs adjusted vs +Morphology',
+       subtitle = 'Outcomes standardised to SD; adding Morphology should pull both effects toward zero',
+       x = 'Sarcomere-positive effect (SD)', y = NULL, colour = NULL) +
+  theme(legend.position = 'bottom')
+
+#--- (4) Focality index: peak wall thickness per unit LV mass -----------------------------------
+#High peak thickness with low total mass = focal/asymmetric hypertrophy. Use unindexed lvmass if
+#present, else fall back to the indexed LVMi (the ratio's direction across groups is unaffected).
+mass_col   <- if ('lvmass' %in% names(invest_df)) 'lvmass' else 'lvmassi'
+mass_label <- if (mass_col == 'lvmass') 'LV mass (g)' else 'LVMi (g/m2)'
+
+focality_df <- invest_df %>%
+  filter(is.finite(wallthkmax), is.finite(.data[[mass_col]]), .data[[mass_col]] > 0) %>%
+  mutate(focality = wallthkmax / .data[[mass_col]])
+
+#Wilcoxon test of the focality index between groups
+foc_p <- wilcox.test(focality ~ sarc, data = focality_df)$p.value
+foc_med <- focality_df %>% group_by(sarc) %>% summarise(med = median(focality), .groups = 'drop')
+print(foc_med)  #Median focality (peak WT per unit mass) by group
+
+p_focality <- ggplot(focality_df, aes(sarc, focality, fill = sarc)) +
+  geom_violin(alpha = 0.4, trim = TRUE) +
+  geom_boxplot(width = 0.15, outlier.size = 0.4, alpha = 0.7) +
+  scale_fill_manual(values = sarc_pal) +
+  labs(title = 'Focality index: peak wall thickness per unit mass',
+       subtitle = str_glue('maxLVWT / {mass_label}  (Wilcoxon p = {signif(foc_p, 2)})'),
+       x = NULL, y = str_glue('maxLVWT / {mass_label}'), fill = 'Sarcomere') +
+  theme(legend.position = 'none')
+
+discordance_plot <- (p_scatter + p_marg) / (p_contrast + p_focality) +
+  plot_annotation(title = 'Why is sarcomere +ve for maxLVWT but -ve for LVMi?',
+                  theme = theme(plot.title = element_text(face = 'bold', size = 15)))
+
+ggsave(file.path(invest_dir, 'sarcomere_maxLVWT_LVMi_discordance.png'),
+       discordance_plot, width = 16, height = 11, dpi = 600)
+
+discordance_plot
+```
+
+### Morphology confirms the focal mechanism
+
+The higher focality index in sarcomere-positive patients points to asymmetric/focal hypertrophy. The
+`Morphology` factor lets us test this directly: its levels split into **asymmetric/focal** patterns
+(*Localised basal septal*, *Reverse curve septal*, *Apical*) versus **global** hypertrophy (*Concentric*),
+with *Mid-cavity obstruction with apical aneurysm* and *Other* kept separate. If the mechanism holds,
+sarcomere-positive patients should be **enriched for focal patterns and depleted of Concentric**, and the
+focal morphologies should themselves carry **high `wallthkmax` but lower `lvmassi`** — reproducing the
+discordance at the morphology level.
+
+```{r sarcomere_morphology, fig.width=12, fig.height=15}
+#Morphology level order as stored in the data; group into focal vs global remodelling patterns
+morph_levels <- c('Localised basal septal','Reverse curve septal','Apical',
+                  'Concentric','Mid-cavity obstruction with apical aneurysm','Other')
+
+morph_df <- total_df_notransform %>%
+  mutate(sarc = factor(ifelse(sarcomere, 'Positive', 'Negative'), levels = c('Negative','Positive'))) %>%
+  filter(!is.na(Morphology)) %>%
+  mutate(Morphology = factor(as.character(Morphology), levels = morph_levels),
+         pattern = case_when(
+           Morphology == 'Concentric' ~ 'Concentric (global)',
+           Morphology == 'Other'      ~ 'Other',
+           TRUE                       ~ 'Asymmetric / focal'))
+
+pattern_pal <- c('Asymmetric / focal' = '#D55E00', 'Concentric (global)' = '#0072B2', 'Other' = 'grey60')
+
+#--- (A) Morphology composition within each sarcomere group (chi-square on the full table) -------
+morph_chisq_p <- suppressWarnings(chisq.test(table(morph_df$sarc, morph_df$Morphology))$p.value)
+print(prop.table(table(morph_df$sarc, morph_df$Morphology), margin = 1))  #row-wise composition
+
+p_morph_comp <- morph_df %>%
+  count(sarc, Morphology) %>%
+  group_by(sarc) %>% mutate(prop = n / sum(n)) %>% ungroup() %>%
+  ggplot(aes(sarc, prop, fill = Morphology)) +
+  geom_col(colour = 'white', linewidth = 0.2) +
+  scale_fill_viridis_d() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = 'LV morphology composition by sarcomere status',
+       subtitle = str_glue('Chi-square p = {signif(morph_chisq_p, 2)}'),
+       x = NULL, y = 'Proportion', fill = 'Morphology')
+
+#--- (B) maxLVWT and LVMi by morphology (ordered by median peak wall thickness) ------------------
+morph_order <- morph_df %>%
+  group_by(Morphology) %>% summarise(m = median(wallthkmax, na.rm = TRUE), .groups = 'drop') %>%
+  arrange(m) %>% pull(Morphology)
+
+p_morph_pheno <- morph_df %>%
+  select(Morphology, pattern, wallthkmax, lvmassi) %>%
+  pivot_longer(c(wallthkmax, lvmassi), names_to = 'pheno', values_to = 'value') %>%
+  filter(is.finite(value)) %>%
+  mutate(pheno = recode(pheno, wallthkmax = 'maxLVWT (mm)', lvmassi = 'LVMi (g/m2)'),
+         Morphology = factor(Morphology, levels = morph_order)) %>%
+  ggplot(aes(Morphology, value, fill = pattern)) +
+  geom_boxplot(outlier.size = 0.4) +
+  facet_wrap(~ pheno, scales = 'free_x') +
+  coord_flip() +
+  scale_fill_manual(values = pattern_pal) +
+  labs(title = 'maxLVWT and LVMi by LV morphology',
+       x = NULL, y = 'Raw value', fill = 'Pattern') +
+  theme(legend.position = 'bottom')
+
+#Vertical stack: raw maxLVWT/LVMi by sarcomere (Wilcoxon), then morphology composition, then
+#morphology-resolved maxLVWT/LVMi — one combined figure of the focal mechanism
+morph_plot <- p_marg / p_morph_comp / p_morph_pheno +
+  plot_layout(heights = c(1, 1, 1.3)) +
+  plot_annotation(title = 'Sarcomeric HCM is focal: morphology enrichment explains the maxLVWT/LVMi discordance',
+                  theme = theme(plot.title = element_text(face = 'bold', size = 14)))
+
+ggsave(file.path(invest_dir, 'sarcomere_morphology_mechanism.png'),
+       morph_plot, width = 12, height = 15, dpi = 600)
+
+morph_plot
+```
+
+
+# Baseline Summary Table
+
+This produces a baseline-characteristics (Table 1) summary of the analysed HCMR cohort using `gtsummary`, mirroring the phenotypes reported in the rare-variant baseline summary table. Continuous variables are shown as mean (SD) and binary flags as n (%). No subgroup comparison is made — a single overall column across the whole cohort is reported, and the variable recodings mirror those in the rare-variant baseline table. Related phenotypes are grouped under bold section headers (Ethnicity, Family History of HCM, Comorbidities, NYHA Functional Class, etc.) by stacking one `tbl_summary` per section.
+
+```{r baseline_summary_table}
+#Recreate the baseline phenotype definitions (recodings mirror the rare-variant baseline table)
+baseline_tb <- total_df_notransform %>%
+  mutate(
+    genderMale     = gender == 'Male',
+    race_white     = race == 'White',
+    race_black     = race == 'Black/Afr.Am',
+    race_SA        = race == 'SA',
+    race_EA        = race == 'EA',
+    race_other     = race %in% c('Pacific Islander', ' American Indian/Alaskan'),
+    hxhcm1st       = hxhcm1st >= 1,
+    hxhcm2nd       = hxhcm2nd >= 1,
+    hxhcm1st2nd    = hxhcm1st & hxhcm2nd,
+    nyha1          = blnyha == 1,
+    nyha2          = blnyha == 2,
+    nyha3_4        = blnyha %in% c(3, 4),
+    hxafib_persist = hxafib == 'Persistent',
+    hxafib_paroxy  = hxafib == 'Paroxysmal'
+  )
+
+#0/1 raw binary flags -> logical so gtsummary treats them as dichotomous (positive count only)
+raw_binary_flags <- c('hxhtn','diatyp2','cursmoke','hxsync','hxhf','hxstrk','holtnsvt',
+                      'blcp','bldysp','blbeta','blcalc','blacearb','bldisop','blstat',
+                      'bldiur','blantico','blantipl')
+baseline_tb <- baseline_tb %>%
+  mutate(across(any_of(raw_binary_flags), ~ . == 1))
+
+#Display labels (column -> row label, as it appears under its section header)
+baseline_labels <- c(
+  age            = 'Age (years)',
+  genderMale     = 'Male',
+  race_white     = 'White',
+  race_black     = 'Black',
+  race_SA        = 'South Asian',
+  race_EA        = 'East Asian',
+  race_other     = 'Other',
+  bmi            = 'BMI (kg/m2)',
+  hxhcm1st       = '1st degree',
+  hxhcm2nd       = '2nd degree',
+  hxhcm1st2nd    = 'Both 1st and 2nd',
+  hxhtn          = 'Hypertension',
+  diatyp2        = 'Type 2 Diabetes',
+  cursmoke       = 'Current Smoker',
+  nyha1          = 'I',
+  nyha2          = 'II',
+  nyha3_4        = 'III or IV',
+  hxsync         = 'Syncope',
+  hxhf           = 'Heart Failure',
+  hxstrk         = 'Stroke',
+  holtnsvt       = 'Non-sustained Ventricular Tachycardia',
+  holvtrun       = 'Number of VT Runs',
+  hxafib_persist = 'Atrial Fibrillation - Persistent',
+  hxafib_paroxy  = 'Atrial Fibrillation - Paroxysmal',
+  blcp           = 'Chest Pain',
+  bldysp         = 'Dyspnea',
+  blbeta         = 'Beta-blockers',
+  blcalc         = 'Calcium-channel blocker',
+  blacearb       = 'ACE/ARB',
+  bldisop        = 'Disopyramide',
+  blstat         = 'Statins',
+  bldiur         = 'Diuretics',
+  blantico       = 'Oral anticoagulant',
+  blantipl       = 'Oral antiplatelet agent'
+)
+
+#Section structure: each block is a contiguous run of variables, optionally under a bold
+#group header (NA = standalone rows, no header). Stacked together to get the factored layout.
+baseline_sections <- list(
+  list(header = NA_character_, vars = c('age','genderMale')),
+  list(header = 'Ethnicity',              vars = c('race_white','race_black','race_SA','race_EA','race_other')),
+  list(header = NA_character_, vars = 'bmi'),
+  list(header = 'Family History of HCM',  vars = c('hxhcm1st','hxhcm2nd','hxhcm1st2nd')),
+  list(header = 'Comorbidities',          vars = c('hxhtn','diatyp2','cursmoke')),
+  list(header = 'NYHA Functional Class',  vars = c('nyha1','nyha2','nyha3_4')),
+  list(header = 'Other clinical history', vars = c('hxsync','hxhf','hxstrk','holtnsvt','holvtrun','hxafib_persist','hxafib_paroxy')),
+  list(header = 'Symptoms at Enrollment', vars = c('blcp','bldysp')),
+  list(header = 'Medications at Enrollment', vars = c('blbeta','blcalc','blacearb','bldisop','blstat','bldiur','blantico','blantipl'))
+)
+
+#One tbl_summary per section, dropping any variables absent from the data
+make_section_tbl <- function(vars){
+  vars <- intersect(vars, names(baseline_tb))
+  if(length(vars) == 0) return(NULL)
+  label_list <- map2(vars, unname(baseline_labels[vars]),
+                     ~ rlang::new_formula(rlang::sym(.x), .y))
+  baseline_tb %>%
+    select(all_of(vars)) %>%
+    tbl_summary(
+      label     = label_list,
+      statistic = list(all_continuous() ~ '{mean} ({sd})',
+                       all_categorical() ~ '{n} ({p}%)'),
+      digits    = all_continuous() ~ 1,
+      missing   = 'no'
+    )
+}
+
+section_tbls <- map(baseline_sections, ~ make_section_tbl(.x$vars))
+keep         <- !map_lgl(section_tbls, is.null)
+
+#Stack the sections, using the headers as bold row-group labels (NA -> ungrouped rows)
+baseline_summary_tbl <- tbl_stack(
+  section_tbls[keep],
+  group_header = map_chr(baseline_sections, 'header')[keep],
+  quiet = TRUE
+) %>%
+  modify_header(label ~ '**Characteristic**') %>%
+  bold_labels()
+
+#Save as html and render inline
+baseline_out_dir <- 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/allpredictor/'
+dir.create(baseline_out_dir, recursive = TRUE, showWarnings = FALSE)
+gtsummary::as_gt(baseline_summary_tbl) %>%
+  gt::gtsave(file.path(baseline_out_dir, 'baseline_summary_table.html'))
+
+baseline_summary_tbl
+```
+
+# Data Preprocessing
+
+This filters to the analysed cohort, joins the PRS (scaled per-SD) and PCs, and retains the CRF, plasma-protein and endophenotype columns. 
+`cmrdiabp` is kept on its original name and relabelled to DBP only in the figures (avoiding a rename-before-select ordering issue).
+
+```{r}
+data_preprocessor <- function(total_df, hcmr_prs, vars_keep, sarcomere_status=c(T,F), prs_scale=TRUE, hcmr_pcs=NULL){
+  out <- total_df %>%
+    filter(sarcomere %in% sarcomere_status) %>%
+    left_join(select(hcmr_prs, HCR_IDs=IID, cv_prs=SCORE1_AVG), by='HCR_IDs')
+
+  if(isTRUE(prs_scale)){
+    out <- mutate(out, cv_prs = scale(cv_prs)[,1])
+  }
+
+  #Derive smoking as a 0/1 ever-vs-never flag from the current/past smoking fields (mirrors script 1)
+  if(all(c('cursmoke','pstsmoke') %in% names(out))){
+    out <- mutate(out, smoking = case_when(
+      cursmoke == 1 | pstsmoke == 1 ~ 1,   #current OR past smoker -> ever
+      cursmoke == 0 & pstsmoke == 0 ~ 0,   #neither -> never
+      TRUE ~ NA_real_
+    ))
+  }
+
+  #Recode categorical prior-history fields to 0/1 (any positive category -> 1, 'None' -> 0)
+  if('hxafib' %in% names(out)){
+    out <- mutate(out, hxafib = case_when(
+      hxafib %in% c('Persistent','Paroxysmal') ~ 1,
+      hxafib %in% 'None' ~ 0,
+      TRUE ~ NA_real_
+    ))
+  }
+  if('hxvt' %in% names(out)){
+    out <- mutate(out, hxvt = case_when(
+      hxvt %in% c('Sustained','Nonsustained') ~ 1,
+      hxvt %in% 'None' ~ 0,
+      TRUE ~ NA_real_
+    ))
+  }
+
+  out <- out %>%
+    select(HCR_IDs, age, sex=gender, bsa, FieldStrength, sarcomere, cv_prs, any_of(vars_keep))
+
+  if(!is.null(hcmr_pcs)){
+    out <- left_join(out, select(hcmr_pcs, HCR_IDs=IID, PC1:PC10), by='HCR_IDs')
+  }
+  out
+}
+
+sarcall <- data_preprocessor(total_df_notransform, hcmr_prs,
+                             vars_keep = c(crfs, proteins, endophenos),
+                             sarcomere_status=c(T,F), hcmr_pcs=hcmr_pcs)
+
+rm(total_df_notransform, hcmr_prs)
+
+#Sanity check: every reported predictor + endophenotype is present
+setdiff(c(reported_predictors, endophenos), names(sarcall))
+```
+
+This standardises the continuous outcomes and predictors to SD units (after log1p for the skewed LGE outcome and the plasma proteins) so the betas are directly comparable; the binary CRFs and sarcomere status are left on the native 0/1 scale.
+
+```{r}
+#Toggle: TRUE = log1p the skewed vars before standardising; FALSE = standardise only.
+#Standardisation is linear so does not affect inference on its own; this flag only controls
+#whether the skewed LGE outcome + plasma proteins are log-transformed (the sole nonlinear step).
+apply_log <- TRUE
+
+#Heavily right-skewed continuous variables considered for log1p
+log_cols <- c('lge_total', proteins)
+
+#Snapshot the raw (untransformed) values for the before/after distribution plots
+dist_raw <- sarcall %>%
+  select(any_of(log_cols)) %>%
+  mutate(across(everything(), as.numeric))
+
+if (isTRUE(apply_log)) {
+  sarcall <- sarcall %>%
+    mutate(across(any_of(log_cols), ~ log1p(as.numeric(.))))
+}
+
+#Standardise continuous outcomes + continuous predictors to SD (cv_prs already scaled)
+sd_cols <- c(endophenos, cont_predictors, proteins)
+sarcall_scaled <- sarcall %>%
+  mutate(across(any_of(sd_cols), ~ as.numeric(scale(.)))) %>%
+  mutate(across(any_of(binary_crfs), as.numeric))  #ensure native-scale numeric 0/1
+
+#Double-check every prior-history/smoking CRF is a strict 0/1 flag (NA allowed); stop if any other value remains
+binary_bad <- sarcall_scaled %>%
+  select(any_of(binary_crfs)) %>%
+  map_lgl(~ any(!(.x %in% c(0, 1, NA))))
+if (any(binary_bad)) {
+  stop('Non-0/1 values remain in binary CRF(s): ', paste(names(binary_bad)[binary_bad], collapse = ', '))
+}
+```
+
+This checks the effect of the log1p + SD standardisation on the skewed variables (LGE and the plasma proteins), plotting the raw distribution (left column) against the transformed distribution (right column) for each.
+
+```{r, fig.width=10, fig.height=10}
+#Display names + raw-scale units for the skewed variables
+transformed_var_disp <- c(
+  'lge_total' = 'Total LGE (%)',
+  'NTproBNP'  = 'NT-proBNP (pg/mL)',
+  'TnTStat'   = 'Troponin T (ng/L)'
+)
+stage_fill <- c('Before' = '#E69F00', 'After' = '#56B4E9')
+
+density_panel <- function(values, title, xlab, fill){
+  ggplot(tibble(value = values[is.finite(values)]), aes(x = value)) +
+    geom_density(fill = fill, alpha = 0.6) +
+    labs(title = title, x = xlab, y = 'Density') +
+    theme_classic(base_size = 12)
+}
+
+#Build before (raw) and after (log1p + SD) panels for each variable, ordered row-wise
+beforeafter_panels <- map(names(transformed_var_disp), function(v){
+  list(
+    density_panel(dist_raw[[v]],        str_glue('{transformed_var_disp[[v]]}\nBefore (raw)'),
+                  transformed_var_disp[[v]], stage_fill[['Before']]),
+    density_panel(sarcall_scaled[[v]],  str_glue('{transformed_var_disp[[v]]}\nAfter (log1p + standardisation)'),
+                  'Standardised value (SD of log)', stage_fill[['After']])
+  )
+}) %>% flatten()
+
+beforeafter_plot <- wrap_plots(beforeafter_panels, ncol = 2, byrow = TRUE) +
+  plot_annotation(title = 'Effect of log1p + SD Standardisation on Skewed Variables')
+
+dir.create('genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/allpredictor/',
+           recursive = TRUE, showWarnings = FALSE)
+ggsave('genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/allpredictor/transformation_before_after_distributions.png',
+       beforeafter_plot, width = 10, height = 10, dpi = 600)
+
+beforeafter_plot
+```
+
+This visualises the distribution of each (standardised) endophenotype.
+
+```{r}
+sarcall_scaled %>%
+  select(all_of(endophenos)) %>%
+  pivot_longer(everything(), names_to='pheno', values_to='value') %>%
+  ggplot(aes(x=value)) +
+  geom_density(fill='lightblue', alpha=0.5) +
+  facet_wrap(~pheno, scales='free') +
+  labs(title='Density Plots of Standardised Endophenotypes')
+```
+
+# Joint Linear Regression
+
+For each endophenotype this fits the joint model
+`pheno ~ age + sex + 3PCs (+ BSA for wall thickness) + cv_prs + sarcomere + CRFs + plasma proteins`.
+`linear_logistic_regression_modeller` reports the PRS plus every additional predictor from this single mutually-adjusted fit, so all effects are conditional on one another.
+
+```{r}
+adjust_covars  <- c('age','sex','FieldStrength','PC1','PC2','PC3')        #not reported; BSA auto-added for wallthkmax
+model_covars   <- c(adjust_covars, extra_predictors)       #full RHS (minus the main predictor cv_prs)
+
+joint_lm <- map(continuous_param_list, ~ linear_logistic_regression_modeller(
+  sarcall_scaled,
+  .x,
+  predictor = 'cv_prs',
+  predictor_type = 'continuous',
+  covars = model_covars,
+  additional_predictors_to_report = extra_predictors
+)) %>% bind_rows()
+
+#Attach phenotype labels + colour, then FDR-correct across all predictor x endophenotype tests
+joint_lm <- joint_lm %>%
+  left_join(pheno_labels, by='pheno') %>%
+  colour_hardcoder() %>%
+  mutate(adj_p = p.adjust(pval, method='fdr'),
+         predictor_label = recode(predictor_reported, !!!predictor_label_map),
+         Group = group_of(predictor_reported),
+         #Human-readable effect string: beta [lower, upper] 95% CI (SD units)
+         beta_ci = sprintf('%.2f [%.2f, %.2f]', estimate, estimate - 1.96*SE, estimate + 1.96*SE))
+
+out_dir <- 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/allpredictor/'
+dir.create(out_dir, recursive=TRUE, showWarnings=FALSE)
+write_tsv(joint_lm %>% select(pheno, Label, predictor_reported, predictor_label, Group, estimate, SE, beta_ci, pval, adj_p),
+          file.path(out_dir, 'summary_allpredictor_joint_lm_results.tsv'))
+```
+
+### Raw-Unit Outcome Models
+
+This refits the identical joint models but with each endophenotype left in its **raw units** —
+no SD standardisation and no log1p for LGE. The predictors keep their original treatment
+(`cv_prs` per-SD, proteins log1p + SD, continuous CRFs per-SD, binary CRFs/sarcomere native 0/1),
+so the betas are now interpretable in each endophenotype's native units (mm, g/m2, %, etc.).
+The raw outcomes are reconstructed from `sarcall` (non-logged endophenotypes are still raw there)
+and `dist_raw` (the snapshot of raw, un-logged LGE) since `total_df_notransform` has been removed.
+
+```{r}
+#Raw endophenotypes: non-log outcomes are untouched in `sarcall`; restore raw LGE from dist_raw
+raw_endos_df <- sarcall %>%
+  select(all_of(endophenos)) %>%
+  mutate(lge_total = dist_raw$lge_total) %>%
+  mutate(ecvfwhole = ecvfwhole * 100) #To convert to %
+
+#Swap the scaled outcomes for raw ones; predictors stay as in sarcall_scaled (same row order)
+sarcall_rawpheno <- sarcall_scaled %>%
+  mutate(across(all_of(endophenos), ~ raw_endos_df[[cur_column()]]))
+
+joint_lm_raw <- map(continuous_param_list, ~ linear_logistic_regression_modeller(
+  sarcall_rawpheno,
+  .x,
+  predictor = 'cv_prs',
+  predictor_type = 'continuous',
+  covars = model_covars,
+  additional_predictors_to_report = extra_predictors
+)) %>% bind_rows()
+
+joint_lm_raw <- joint_lm_raw %>%
+  left_join(pheno_labels, by='pheno') %>%
+  colour_hardcoder() %>%
+  mutate(adj_p = p.adjust(pval, method='fdr'),
+         predictor_label = recode(predictor_reported, !!!predictor_label_map),
+         Group = group_of(predictor_reported),
+         #Effect string in raw outcome units: beta [lower, upper] 95% CI
+         beta_ci = sprintf('%.2g [%.2g, %.2g]', estimate, estimate - 1.96*SE, estimate + 1.96*SE))
+
+write_tsv(joint_lm_raw %>% select(pheno, Label, predictor_reported, predictor_label, Group, estimate, SE, beta_ci, pval, adj_p),
+          file.path(out_dir, 'summary_allpredictor_joint_lm_results_rawpheno.tsv'))
+```
+
+## Summary Table
+
+```{r}
+joint_lm %>%
+  transmute(Endophenotype = Label, Predictor = predictor_label, Group,
+            Beta_SD = estimate, SE, P = pval, FDR_P = adj_p) %>%
+  arrange(Endophenotype, Group, P) %>%
+  mutate(across(where(is.numeric), ~signif(.,3))) %>%
+  kable(format='html') %>%
+  kable_styling(full_width = F) %>%
+  scroll_box(height = '500px')
+```
+
+## Forest Plots of All Predictors (by Endophenotype Category)
+
+This plots the mutually-adjusted standardised betas for every reported predictor, coloured by predictor
+category, split into three single-row forest plots by endophenotype domain: **hypertrophy** (LV mass index,
+maximal wall thickness), **fibrosis** (total LGE, ECV fraction) and **contractility** (LVEF, LV strain).
+Significance stars use the FDR-adjusted p-values (`*` < 0.05, `**` < 0.01, `***` < 0.001).
+
+```{r}
+#Group each endophenotype into a functional domain
+pheno_domains <- list(
+  hypertrophy   = c('lvmassi','wallthkmax'),
+  fibrosis      = c('lge_total','ecvfwhole'),
+  contractility = c('lvef','lvs_ellmean','lvs_eccmean','lvs_errmean')
+)
+
+forest_plot_allpredictors <- function(results, output_dir, predictor_order, phenos = NULL,
+                                       file_name = 'forest_plot_allpredictor.png', group_palette = 'Set1',
+                                       nrow = 1, width = 12, height = 6, dpi = 600){
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+  dat <- results %>%
+    { if (is.null(phenos)) . else filter(., pheno %in% phenos) } %>%
+    filter(is.finite(estimate), is.finite(SE)) %>%
+    mutate(conf_low  = estimate - 1.96*SE,
+           conf_high = estimate + 1.96*SE,
+           sig_label = case_when(
+             adj_p <= 0.001 ~ '***',
+             adj_p <= 0.01  ~ '**',
+             adj_p <= 0.05  ~ '*',
+             TRUE ~ ''),
+           predictor_label = factor(predictor_label, levels = rev(predictor_order)),
+           Group = factor(Group, levels = c('PRS','Sarcomere','Clinical Risk Factor','Plasma Protein')))
+
+  #Drop the trailing unit in parentheses from facet labels (all phenotypes standardised to SD)
+  strip_units <- function(x) str_trim(str_remove(x, '\\s*\\([^()]*\\)\\s*$'))
+  dat <- mutate(dat, Label = strip_units(Label))
+
+  #Facet (endophenotype) order follows the supplied `phenos` order, not alphabetical
+  ord_phenos   <- if (is.null(phenos)) pheno_labels$pheno else phenos
+  label_levels <- strip_units(pheno_labels$Label[match(ord_phenos, pheno_labels$pheno)])
+  label_levels <- label_levels[label_levels %in% dat$Label]   #keep only facets actually present
+  dat <- mutate(dat, Label = factor(Label, levels = label_levels))
+
+  p <- ggplot(dat, aes(x = estimate, y = predictor_label, fill = Group)) +
+    geom_vline(xintercept = 0, linetype = 'dashed', colour = 'grey50') +
+    geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.2) +
+    geom_point(shape = 23, size = 2, colour = 'black', stroke = 0.4) +
+    geom_text(aes(label = sig_label), vjust = -0.05, size = 4, show.legend = FALSE) +
+    facet_wrap(~ Label, nrow = nrow, scales = 'free_x') +
+    scale_fill_brewer(palette = group_palette) +
+    labs(x = 'Effect on Endophenotype (SD)', y = NULL, fill = 'Predictor type') +
+    theme_classic(base_size = 13) +
+    theme(panel.grid.minor = element_blank(),
+          strip.background = element_rect(fill = 'grey95'),
+          strip.text = element_text(face = 'bold'),
+          legend.position = 'bottom')
+
+  ggsave(file.path(output_dir, file_name), p, width = width, height = height, dpi = dpi)
+  p
+}
+
+forest_out_dir <- 'genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/allpredictor/'
+
+#One single-row forest plot per endophenotype domain (facet order = the order in pheno_domains)
+forest_plots <- imap(pheno_domains, ~ forest_plot_allpredictors(
+  joint_lm,
+  output_dir = forest_out_dir,
+  predictor_order = predictor_order,
+  phenos = .x,
+  file_name = str_glue('forest_plot_allpredictor_{.y}.png'),
+  height = 5,
+  width = 5 + 2 * length(.x)
+))
+
+#Overall forest plot: combine the 3 domain plots with patchwork (hypertrophy -> fibrosis -> contractility).
+#Drop the redundant y-axis (predictor) labels on the 2nd/3rd panels and collect a single shared legend;
+#relative widths track the number of facets per domain.
+strip_x <- theme(axis.title.x = element_blank())
+
+forest_plots$overall <- (
+  (forest_plots$hypertrophy + strip_x) /
+  (forest_plots$fibrosis + strip_x     ) /
+  (forest_plots$contractility)
+) +
+  plot_layout(nrow=3, guides = 'collect',
+              widths = map_dbl(pheno_domains, length)) &
+  theme(legend.position = 'bottom')
+
+ggsave(file.path(forest_out_dir, 'forest_plot_allpredictor_overall.png'),
+       forest_plots$overall, height = 5 + 1 * length(endophenos), width = 10, dpi = 600)
+```
+
+```{r, fig.width=9, fig.height=7}
+forest_plots$hypertrophy
+```
+
+```{r, fig.width=9, fig.height=7}
+forest_plots$fibrosis
+```
+
+```{r, fig.width=14, fig.height=7}
+forest_plots$contractility
+```
+
+Overall forest plot across all endophenotypes, ordered hypertrophy -> fibrosis -> contractility.
+
+```{r, fig.width=20, fig.height=7}
+forest_plots$overall
+```
+
+**Statistical caveats.** 
+(1) Each model is complete-case; and the joint N differs across endophenotypes. 
+(2) Rare binary CRFs (e.g. prior VT/SCD) may have few positives, giving wide CIs; non-finite estimates are filtered before plotting. 
+(3) FDR is applied jointly across all predictor x endophenotype tests. 
+(4) Mutually-adjusted betas assume no severe collinearity among predictors. 
+(5) Effect sizes are in SD units of each standardised endophenotype; binary CRFs/sarcomere are presence-vs-absence contrasts, continuous predictors/PRS are per-SD.
+
+# Linear Regression Assumptions
+
+This section evaluates the OLS assumptions for each joint endophenotype model. The standardise/log choices do not materially change these checks.
+
+**Multicollinearity** (relevant with this many jointly-modelled predictors) is quantified by VIF below. The
+remaining assumptions are assessed graphically in the diagnostic-plot section, in order of importance at this
+sample size:
+**linearity** of the conditional mean,
+**homoscedasticity**,
+**influential points/leverage**,
+
+and—least critical, since the CLT covers large-N Wald inference—approximate **normality of residuals**.
+
+## Refit Models (returning the fitted lm objects)
+
+The same joint models are refit with `model_return = TRUE` so the underlying `lm` objects are available for
+diagnostics.
+
+```{r}
+joint_lm_models <- map(continuous_param_list, ~ linear_logistic_regression_modeller(
+  sarcall_scaled, .x,
+  predictor = 'cv_prs', predictor_type = 'continuous',
+  covars = model_covars, additional_predictors_to_report = extra_predictors,
+  model_return = TRUE
+))
+names(joint_lm_models) <- endophenos
+```
+
+## Multicollinearity (VIF)
+
+This reports, per model, the maximum variance inflation factor (VIF) across design-matrix columns and the
+predictor carrying it. All RHS terms here are single-df (continuous or 0/1 binary; sex is a 2-level factor),
+so ordinary VIF equals the generalised VIF and is the appropriate metric. The remaining OLS assumptions
+(linearity, homoscedasticity, influence, residual normality) are assessed graphically in the next section.
+```{r}
+#Dependency-free VIF on the design-matrix columns (one per dummy for factor terms)
+design_vif <- function(model){
+  X <- model.matrix(model)
+  X <- X[, colnames(X) != '(Intercept)', drop = FALSE]
+  if (ncol(X) < 2) return(setNames(rep(NA_real_, ncol(X)), colnames(X)))
+  v <- vapply(seq_len(ncol(X)), function(j){
+    r2 <- summary(lm(X[, j] ~ X[, -j, drop = FALSE]))$r.squared
+    1 / (1 - r2)
+  }, numeric(1))
+  setNames(v, colnames(X))
+}
+
+#Per model: N, max VIF and the design-matrix column carrying it
+vif_summary <- function(model){
+  vif <- design_vif(model)
+  tibble(
+    n           = length(residuals(model)),
+    max_vif     = max(vif, na.rm = TRUE),
+    max_vif_var = names(which.max(vif))
+  )
+}
+
+lm_vif_tbl <- imap_dfr(joint_lm_models, ~ vif_summary(.x) %>% mutate(pheno = .y)) %>%
+  left_join(pheno_labels, by = 'pheno') %>%
+  transmute(Endophenotype = Label, N = n, Max_VIF = max_vif, Max_VIF_Predictor = max_vif_var)
+
+write_tsv(lm_vif_tbl, file.path(out_dir, 'lm_vif_summary.tsv'))
+
+lm_vif_tbl %>%
+  mutate(across(where(is.numeric), ~ signif(., 3))) %>%
+  kable(format = 'html', caption = 'Maximum VIF per joint endophenotype model') %>%
+  kable_styling(full_width = F)
+```
+
+Interpretation threshold: **Max_VIF > 5** moderate, **> 10** severe collinearity.
+
+## Diagnostic Plots (per model)
+
+The standard four `plot.lm` panels per model: 
+- residuals-vs-fitted (linearity), 
+- Normal Q-Q (residual normality),
+- scale-location (homoscedasticity) and 
+- residuals-vs-leverage (influence). 
+
+Saved to disk and rendered inline.
+```{r, fig.width=9, fig.height=8}
+diag_dir <- file.path(out_dir, 'assumption_plots')
+dir.create(diag_dir, recursive = TRUE, showWarnings = FALSE)
+
+iwalk(joint_lm_models, function(model, ph){
+  label <- pheno_labels$Label[pheno_labels$pheno == ph]
+
+  #Save the 2x2 diagnostic panel
+  grDevices::png(file.path(diag_dir, str_glue('lm_diag_{ph}.png')), width = 9, height = 8, units = 'in', res = 300)
+  op <- par(mfrow = c(2, 2)); plot(model, sub.caption = label); par(op)
+  grDevices::dev.off()
+
+  #Render inline
+  op <- par(mfrow = c(2, 2)); plot(model, sub.caption = label); par(op)
+})
+```

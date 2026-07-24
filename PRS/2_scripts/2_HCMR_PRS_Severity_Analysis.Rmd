@@ -1,0 +1,1117 @@
+---
+title: "Comparison of PRS x Severity in HCMR"
+author: "Jonathan Chan"
+date: "2026-01-22"
+output: 
+  html_document:
+    code_folding: hide   
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(viridis)
+library(tictoc)
+library(kableExtra)
+library(readxl)
+library(ggrepel)
+
+rm(list=ls())
+
+theme_set(theme_classic(base_size=14))
+source('genetic_subset_analysis/common/hcmr_outcomes_functions.R')
+```
+
+# Import
+
+This imports in the HCMR data after preprocessing.
+
+```{r}
+primary_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_primary_outcome_df_2445.rds')
+secondary_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_secondary_outcome_df_2445.rds')
+hf_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_hf_outcome_df_2445.rds')
+va_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_va_outcome_df_2445.rds')
+af_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_af_outcome_df_2445.rds')
+stroke_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_stroke_outcome_df_2445.rds')
+
+#Add in the HCMR PRS scores (this is with the minimac-r2-filter for INFO 0.3-1.0) and computed with the intersectvars with UKB
+hcmr_prs <- read_tsv('genetic_subset_analysis/PRS/1_input/hcmr_imputedvars_prs.sscore')
+
+hcmr_pcs <- read_delim('popgen/2_gwas/data/hcmr/HCMR_HARDCALLS/pcs_hcmr_10pcs')
+
+#Add in the rare variant class as P_LP or VUS or sarcomere-negative
+hcmr_rarevar_class <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class_plp_vusfpvus.tsv') %>%
+    select(HCR_IDs=HCR_ID, rarevar_class=class) %>%
+    mutate(sarcomere_binned = case_when(
+      str_detect(rarevar_class,'_P_LP$') ~ 'P_LP', #So multiple variant individuals are assigned to P_LP if they have one
+      str_detect(rarevar_class, 'VUS_FP_VUS') ~ 'VUS',
+      TRUE ~ 'Sarcomere-negative'
+    ))
+
+# covars <- c('bmi','cmrdiabp') #Use neither covar because I later implement these as clinical risk factors in SevScore
+covars <- c('sex','race')
+outcome_vars <- c('hcmdt','event','event_date','event_indicator','event_or_censoring_date','time_to_event_or_censoring_years','age_at_event_or_censoring')
+```
+
+# Data Preprocessing
+
+This preprocesses + filters the data to all-comer or the subgroups of sarcomere-positive and sarcomere-negative individuals.
+```{r}
+sarcall <- map(list(primary_outcomes_df, secondary_outcomes_df, hf_outcomes_df, va_outcomes_df, af_outcomes_df, stroke_outcomes_df), ~ data_preprocessor(.,  hcmr_rarevar_class, c(covars, outcome_vars), sarcomere_status=c(T,F), hcmr_pcs=hcmr_pcs, hcmr_prs=hcmr_prs))
+sarcpos <- map(list(primary_outcomes_df, secondary_outcomes_df, hf_outcomes_df, va_outcomes_df, af_outcomes_df, stroke_outcomes_df), ~ data_preprocessor(., hcmr_rarevar_class, c(covars, outcome_vars), sarcomere_status=T, hcmr_pcs=hcmr_pcs, hcmr_prs=hcmr_prs))
+sarcneg <- map(list(primary_outcomes_df, secondary_outcomes_df, hf_outcomes_df, va_outcomes_df, af_outcomes_df, stroke_outcomes_df), ~ data_preprocessor(.,  hcmr_rarevar_class, c(covars, outcome_vars), sarcomere_status=F, hcmr_pcs=hcmr_pcs, hcmr_prs=hcmr_prs))
+
+rm(primary_outcomes_df, secondary_outcomes_df, hcmr_prs, hcmr_rarevar_class)
+
+#Check for unique values of sarcomere_binned
+map(sarcall, ~ unique(.x$sarcomere_binned))
+```
+
+# Cox Regression Analysis
+
+## PRS as Predictor
+
+```{r}
+#Run the age as timescale analyses 
+sarcall_cox_agetimescale <- map2(sarcall[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs',
+             predictor_type='continuous',
+             covars=c(covars, 'sarcomere'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+             suffix=.y
+             )) %>% bind_rows()
+
+#Repeat with time-varying covariate for sarcomere for the secondary composite only
+sarcall_cox_agetimescale_secondary_sarctt <- map2(sarcall[2], c('_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs',
+             predictor_type='continuous',
+             covars=c(covars,'sarcomere'),
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+             suffix=.y, time_dependent_predictor='sarcomere', age0=median(.x$age, na.rm=T)
+             )) %>% bind_rows()
+
+#Add back to sarcall_cox_agetimescale
+sarcall_cox_agetimescale <- bind_rows(
+  sarcall_cox_agetimescale %>% filter(composite == 'primary'),
+  sarcall_cox_agetimescale_secondary_sarctt %>% filter(composite == 'secondary')
+)
+
+rm(sarcall_cox_agetimescale_secondary_sarctt)
+```
+
+```{r}
+#This converts the PRS into categorical PRS groups based on quantiles where the output column name is the prs_colname_categorical
+prs_categoriser <- function(input_list, prs_colname = 'cv_prs', quantile_thresholds=c(0.2,0.8)){
+  output_list <- map(input_list, function(x) x %>%
+    mutate(!!sym(paste0(prs_colname,'_categorical')) := case_when(
+      !!sym(prs_colname) <= quantile(!!sym(prs_colname), quantile_thresholds[1], na.rm = TRUE) ~ 'Low PRS',
+      !!sym(prs_colname) >= quantile(!!sym(prs_colname), quantile_thresholds[2], na.rm = TRUE) ~ 'High PRS',
+      TRUE ~ 'Intermediate PRS'
+    )) %>%
+    mutate(!!sym(paste0(prs_colname,'_categorical')) := factor(!!sym(paste0(prs_colname,'_categorical')), levels = c('Low PRS', 'Intermediate PRS', 'High PRS')))
+  )
+}
+sarcall_categoricalprs <- prs_categoriser(sarcall)
+
+#Rerun the age as timescale analyses but with categorical prs
+sarcall_catprs_cox_agetimescale <- map2(sarcall_categoricalprs[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs_categorical',
+             predictor_type='categorical',
+             covars=c(covars, 'sarcomere'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cat/',
+             suffix=.y
+             )) %>% bind_rows()
+
+#Repeat with time-varying covariate for sarcomere for the secondary composite only
+sarcall_catprs_cox_agetimescale_secondary_sarctt <- map2(sarcall_categoricalprs[2], c('_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs_categorical',
+             predictor_type='categorical',
+             covars=c(covars,'sarcomere'),
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cat/',
+             suffix=.y, time_dependent_predictor='sarcomere', age0=median(.x$age, na.rm=T)
+             )) %>% bind_rows()
+
+#Add back to sarcall_catprs_cox_agetimescale
+sarcall_catprs_cox_agetimescale <- bind_rows(
+  sarcall_catprs_cox_agetimescale %>% filter(composite == 'primary'),
+  sarcall_catprs_cox_agetimescale_secondary_sarctt %>% filter(composite == 'secondary')
+)
+
+rm(sarcall_catprs_cox_agetimescale_secondary_sarctt)
+```
+
+This provides an output summary table of the Cox regression analyses for both the continuous and categorical PRS analyses in the sarcomere-allcomer group.
+
+```{r}
+sarcall_cox_summary <- bind_rows(
+  sarcall_cox_agetimescale %>% mutate(model_type='Continuous PRS'),
+  sarcall_catprs_cox_agetimescale %>% mutate(model_type='Categorical PRS')
+) %>%
+  filter(str_detect(term, 'cv_prs')) %>%
+  select(model_type, term, n_events, composite, hr, hr_low, hr_high, p.value)
+
+write_tsv(sarcall_cox_summary, 'genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/summary_sarcomereallcomer_cox_results.tsv')
+```
+
+```{r}
+#Knitr kable out the sarcall_cox_summary by primary and secondary composites
+sarcall_cox_summary %>%
+  filter(composite == 'primary') %>%
+  mutate(across(is.numeric, ~signif(.,3))) %>%
+  kable(format='html', 
+        col.names=c('Model Type','Term','Number of Events','Composite Outcome','Hazard Ratio','HR 95% CI Low','HR 95% CI High','P-value')) %>%
+  kable_styling(full_width = F)
+```
+
+```{r}
+#Knitr kable out the sarcall_cox_summary by primary and secondary composites
+sarcall_cox_summary %>%
+  filter(composite == 'secondary') %>%
+    mutate(across(is.numeric, ~signif(.,3))) %>%
+  kable(format='html', 
+        col.names=c('Model Type','Term','Number of Events','Composite Outcome','Hazard Ratio','HR 95% CI Low','HR 95% CI High','P-value')) %>%
+  kable_styling(full_width = F)
+```
+
+This plots out an overall forest plot with both PRS (in its continuous and categorical forms) facetted by the composite outcome.
+
+```{r}
+prs_cox_plot_tb <- bind_rows(
+  sarcall_cox_agetimescale %>% mutate(model_type='Continuous PRS'),
+  sarcall_catprs_cox_agetimescale %>% mutate(model_type='Categorical PRS')
+) %>%
+  filter(str_detect(term, 'cv_prs')) %>%
+  mutate(term = case_when(
+    term == 'cv_prs' ~ 'PRS (per SD increase)',
+    term == 'cv_prs_categoricalHigh PRS' ~ 'High PRS vs Low PRS',
+    term == 'cv_prs_categoricalIntermediate PRS' ~ 'Intermediate PRS vs Low PRS'
+  )) %>%
+    mutate(composite = str_to_title(composite)) %>%
+    mutate(term = factor(term, levels=c('PRS (per SD increase)',
+                                    'Intermediate PRS vs Low PRS',
+                                    'High PRS vs Low PRS'), ordered=T)) %>%
+    select(term,n_events, composite, hr, hr_low, hr_high, p.value, Group = model_type) %>%
+    mutate(adj_pvalue = p.adjust(p.value, method='fdr'))
+
+#Plot the forest plot
+forest_plot_cox(
+  prs_cox_plot_tb,
+  output_dir = 'genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/',
+  suffix='_prs', group_palette='Set1'
+)
+
+rm(prs_cox_plot_tb, sarcall_catprs_cox_agetimescale)
+```
+
+### Subgroup Analyses
+
+This analyses the continuous PRS effect in the sarcomere-positive and sarcomere-negative subgroups.
+
+```{r}
+sarcpos_cox_agetimescale <- map2(sarcpos[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs',
+             predictor_type='continuous',
+             covars=covars, #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcpos/cont/',
+             suffix=.y
+             )) %>% bind_rows()
+
+#Repeat for the sarcomere-negative subgroup
+sarcneg_cox_agetimescale <- map2(sarcneg[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs',
+             predictor_type='continuous',
+             covars=covars, #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcneg/cont/',
+             suffix=.y
+             )) %>% bind_rows()
+
+#Also repeat the categorical PRS analyses for both subgroups
+sarcpos_catprs_cox_agetimescale <- map2(sarcall_categoricalprs[1:2] %>% map(~ filter(.x, sarcomere==T)), c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs_categorical',
+             predictor_type='categorical',
+             covars=covars, #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcpos/cat/',
+             suffix=.y
+             )) %>% bind_rows()
+
+sarcneg_catprs_cox_agetimescale <- map2(sarcall_categoricalprs[1:2] %>% map(~ filter(.x, sarcomere==F)), c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs_categorical',
+             predictor_type='categorical',
+             covars=covars, #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcneg/cat/',
+             suffix=.y
+             )) %>% bind_rows()
+```
+
+```{r}
+# Split into 2 forest plots: continuous PRS and categorical PRS
+
+# 1) Continuous PRS subgroup forest plot
+subgroup_cont_cox_plot_tb <- bind_rows(
+    sarcpos_cox_agetimescale |> mutate(Group = "Sarcomere-positive"),
+    sarcneg_cox_agetimescale |> mutate(Group = "Sarcomere-negative")
+) |>
+    filter(term == "cv_prs") |>
+    mutate(
+        term = "PRS (per SD increase)",
+        term = str_c(term, "\n", Group),
+        composite = str_to_title(composite)
+    ) |>
+    select(term, n_events, composite, hr, hr_low, hr_high, p.value, Group) |>
+    mutate(adj_pvalue = p.adjust(p.value, method = "fdr"))
+
+forest_plot_cox(
+    subgroup_cont_cox_plot_tb,
+    output_dir = "genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/",
+    suffix = "_prs_subgroups_continuous"
+)
+
+# 2) Categorical PRS subgroup forest plot
+subgroup_cat_cox_plot_tb <- bind_rows(
+    sarcpos_catprs_cox_agetimescale |> mutate(Group = "Sarcomere-positive"),
+    sarcneg_catprs_cox_agetimescale |> mutate(Group = "Sarcomere-negative")
+) |>
+    filter(str_detect(term, "cv_prs_categorical")) |>
+    mutate(
+        term = case_when(
+            term == "cv_prs_categoricalIntermediate PRS" ~ "Intermediate PRS vs Low PRS",
+            term == "cv_prs_categoricalHigh PRS" ~ "High PRS vs Low PRS",
+            TRUE ~ term
+        ),
+        term = str_c(term, "\n", Group),
+        composite = str_to_title(composite)
+    ) |>
+    select(term, n_events, composite, hr, hr_low, hr_high, p.value, Group) |>
+    mutate(adj_pvalue = p.adjust(p.value, method = "fdr"))
+
+forest_plot_cox(
+    subgroup_cat_cox_plot_tb,
+    output_dir = "genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/",
+    suffix = "_prs_subgroups_categorical"
+)
+
+rm(sarcpos_catprs_cox_agetimescale, sarcneg_catprs_cox_agetimescale,
+   sarcpos_cox_agetimescale, sarcneg_cox_agetimescale,
+   subgroup_cat_cox_plot_tb, subgroup_cont_cox_plot_tb)
+```
+
+## Sarcomeric Status Focus
+
+This section focuses on the sarcomeric status as predictor with continuous PRS as covariate.
+
+This provides an output summary table for the association of sarcomere status.
+
+```{r}
+sarcomere_status_cox_summary <- sarcall_cox_agetimescale %>%
+  filter(str_detect(term, 'sarcomere')) %>%
+  select(term, n_events, composite, hr, hr_low, hr_high, p.value)
+
+sarcomere_status_cox_summary %>%
+    mutate(across(is.numeric, ~signif(.,3))) %>%
+  kable(format='html', 
+        col.names=c('Term','Number of Events','Composite Outcome','Hazard Ratio','HR 95% CI Low','HR 95% CI High','P-value')) %>%
+  kable_styling(full_width = F)
+```
+
+This reruns the Cox regression but with a sarcomere_binned variable into P_LP vs. VUS vs. Sarcomere-negative.
+
+```{r}
+#Rerun the age as timescale analyses with sarcomere_binned but with PRS as covariate
+sarcall_sarcomerebinned_cox_agetimescale <- map2(sarcall[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='sarcomere_binned',
+             predictor_type='categorical',
+             covars=c(covars, 'cv_prs'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',suffix=.y
+             )) %>% bind_rows()
+
+#Fails to adjust it as a time-varying covariate due to only applicability to 2-level categorical variables
+```
+
+```{r}
+#Plot the forest plot for sarcomere status with both sarcomere and sarcomere_binned
+sarcomere_cox_plot_tb <- bind_rows(
+    sarcall_cox_agetimescale %>% mutate(Group = 'Sarcomere Status'), 
+    sarcall_sarcomerebinned_cox_agetimescale %>% mutate(Group = 'Sarcomere Variant Class')
+) %>%
+  filter(str_detect(term, 'sarcomere')) %>%
+  filter(term != 'tt(sarcomere)') %>% #Remove the time-varying covariate term for sarcomere as it is not plottable in a forest plot and the main sarcomere term is still interpretable as the overall effect across time
+  mutate(term = case_when(
+    term %in% c('sarcomereTRUE', 'sarcomere') ~ 'Sarcomere-positive\nvs.\nSarcomere-negative', #This is because sarcomereTRUE is the term name when using normal Cox regression and sarcomere is the term-name for the time-varying covariate Cox regression
+    term == 'sarcomere_binnedVUS' ~ 'Sarcomere-VUS\nvs.\nSarcomere-negative',
+    term == 'sarcomere_binnedP_LP' ~ 'Sarcomere-P/LP\nvs.\nSarcomere-negative'
+  )) %>%
+    mutate(term = factor(term, levels=c('Sarcomere-positive\nvs.\nSarcomere-negative',
+                                    'Sarcomere-P/LP\nvs.\nSarcomere-negative',
+                                    'Sarcomere-VUS\nvs.\nSarcomere-negative'),ordered=T)) %>%
+    mutate(composite = str_to_title(composite)) %>%
+    select(term,n_events, composite, hr, hr_low, hr_high, p.value, Group) %>%
+    mutate(adj_pvalue = p.adjust(p.value, method='fdr'))
+
+#Plot the forest plot
+forest_plot_cox(
+  sarcomere_cox_plot_tb,
+  output_dir = 'genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall',
+  suffix='_sarcomere', group_palette='Set3'
+)
+
+#N.B These are what the * means
+#         .data$.p_for_stars < 0.001 ~ "***",
+#         .data$.p_for_stars < 0.01 ~ "**",
+#         .data$.p_for_stars < 0.05 ~ "*"
+
+rm(sarcomere_cox_plot_tb)
+```
+
+# Kaplan-Meier Analyses
+
+This plots Kaplan-Meier curves for select categorical comparisons.
+
+This is for PRS categorical groups.
+
+```{r}
+#Plot for PRS categorical groups for both composite outcomes and for both age and time-since-baseline timescales
+walk2(sarcall_categoricalprs[1:2], c('_primarycomposite','_secondarycomposite'), ~km_survival_curv_plotter(.x,'cv_prs_categorical','event_indicator', 'age_at_event_or_censoring', 'genetic_subset_analysis/PRS/3_output/2_Severity/2_KaplanMeier/1_AgeAsTimescale/sarcall/', output_suffix=.y, ylimits=list(c(60,100),c(0.0,0.4),c(0.0,0.4))) 
+)
+
+walk2(sarcall_categoricalprs[1:2], c('_primarycomposite','_secondarycomposite'), ~km_survival_curv_plotter(.x,'cv_prs_categorical','event_indicator', 'time_to_event_or_censoring_years', 'genetic_subset_analysis/PRS/3_output/2_Severity/2_KaplanMeier/2_TimeSinceBaseline/sarcall/', output_suffix=.y, ylimits=list(c(60,100),c(0.0,0.4),c(0.0,0.4)),xlab='Time Since Baseline (Years)') 
+)
+
+```
+
+This is for binary sarcomere status.
+
+```{r}
+#Plot for sarcomere status for both composite outcomes and for both age and time-since-baseline timescales
+walk2(sarcall[1:2], c('_primarycomposite','_secondarycomposite'), ~km_survival_curv_plotter(.x,'sarcomere','event_indicator', 'age_at_event_or_censoring', 'genetic_subset_analysis/PRS/3_output/2_Severity/2_KaplanMeier/1_AgeAsTimescale/sarcall/', output_suffix=.y, ylimits=list(c(60,100),c(0.0,0.4),c(0.0,0.4))) 
+)
+
+#And repeat for the Kaplan Meier plot using Wilcoxon-Breslow test due to sarcomere status invalidating the proportional hazards assumption for secondary composite
+
+km_survival_curv_plotter(sarcall[[2]],'sarcomere','event_indicator', 'age_at_event_or_censoring', 'genetic_subset_analysis/PRS/3_output/2_Severity/2_KaplanMeier/1_AgeAsTimescale/sarcall/', output_suffix='_secondarycomposite_brewslow', ylimits=list(c(60,100),c(0.0,0.4),c(0.0,0.4)), pairwise_test='breslow') 
+
+walk2(sarcall[1:2], c('_primarycomposite','_secondarycomposite'), ~km_survival_curv_plotter(.x,'sarcomere','event_indicator', 'time_to_event_or_censoring_years', 'genetic_subset_analysis/PRS/3_output/2_Severity/2_KaplanMeier/2_TimeSinceBaseline/sarcall/', output_suffix=.y, ylimits=list(c(60,100),c(0.0,0.4),c(0.0,0.4)),xlab='Time Since Baseline (Years)') 
+)
+
+#Also visualise the distribution of age at recruitment for sarcomere positive and negative with a Wilcoxon rank sum test
+
+age_sarcomere_dist <- ggplot(sarcall[[1]])+
+    geom_density(aes(x=age, fill=sarcomere), alpha=0.5)+
+    scale_fill_viridis(discrete=TRUE, option='D', name='Sarcomere Status', labels=c('Negative','Positive'))+
+    labs(x='Age at Recruitment (Years)', y='Density')
+
+print(age_sarcomere_dist)
+
+```
+
+This is for sarcomere_binned status.
+
+```{r}
+#Plot for sarcomere_binned status for both composite outcomes and for both age and time-since-baseline timescales
+
+walk2(sarcall[1:2], c('_primarycomposite','_secondarycomposite'), ~km_survival_curv_plotter(.x,'sarcomere_binned','event_indicator', 'age_at_event_or_censoring', 'genetic_subset_analysis/PRS/3_output/2_Severity/2_KaplanMeier/1_AgeAsTimescale/sarcall/', output_suffix=.y, ylimits=list(c(60,100),c(0.0,0.4),c(0.0,0.4))) 
+)
+
+walk2(sarcall[1:2], c('_primarycomposite','_secondarycomposite'), ~km_survival_curv_plotter(.x,'sarcomere_binned','event_indicator', 'time_to_event_or_censoring_years', 'genetic_subset_analysis/PRS/3_output/2_Severity/2_KaplanMeier/2_TimeSinceBaseline/sarcall/', output_suffix=.y, ylimits=list(c(60,100),c(0.0,0.4),c(0.0,0.4)),xlab='Time Since Baseline (Years)') 
+)
+
+#Also visualise the distribution of age at recruitment for sarcomere positive and negative with a Wilcoxon rank sum test
+age_sarcomere_dist <- ggplot(sarcall[[1]])+
+    geom_density(aes(x=age, fill=sarcomere_binned), alpha=0.5)+
+    scale_fill_viridis(discrete=TRUE, option='D', name='Sarcomere Variant Class')+
+    labs(x='Age at Recruitment (Years)', y='Density')
+
+print(age_sarcomere_dist)
+```
+
+# Time-Since-Baseline Analyses
+
+This uses time-since-baseline as the timescale.
+
+```{r}
+#Run the time-since-baseline analyses 
+sarcall_cox_timesincebaseline <- map2(sarcall[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs',
+             predictor_type='continuous',
+             covars=c('age',covars,'sarcomere'),
+             indicator_varname ='event_indicator',
+             time_varname='time_to_event_or_censoring_years',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/2_TimeSinceBaseline/sarcall/cont/',
+             suffix=.y
+             )) %>% bind_rows()
+
+#Rerun the time-since-baseline analyses
+sarcall_catprs_cox_timesincebaseline <- map2(sarcall_categoricalprs[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs_categorical',
+             predictor_type='categorical',
+             covars=c('age',covars,'sarcomere'),
+             indicator_varname ='event_indicator',
+             time_varname='time_to_event_or_censoring_years',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/2_TimeSinceBaseline/sarcall/cat/',
+             suffix=.y
+             )) %>% bind_rows()
+
+#Rerun the age as timescale analyses with sarcomere_binned but with PRS as covariate
+sarcall_sarcomerebinned_cox_timesincebaseline <- map2(sarcall[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='sarcomere_binned',
+             predictor_type='categorical',
+             covars=c('age','sex','race'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='time_to_event_or_censoring_years',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/2_TimeSinceBaseline/sarcall/cont/',suffix=.y
+             )) %>% bind_rows()
+
+print(sarcall_cox_timesincebaseline%>% select(term, hr, p.value, composite))
+print(sarcall_catprs_cox_timesincebaseline%>% select(term, hr, p.value, composite))
+print(sarcall_sarcomerebinned_cox_timesincebaseline%>% select(term, hr, p.value, composite))
+
+rm(list=ls(pattern='timesincebaseline'))
+```
+
+# Time/Age Since Diagnosis Analyses
+
+This section reruns the Cox regression analyses using time since diagnosis as timescale instead of age or time-since-baseline.
+
+```{r}
+sarcall_time_since_diagnosis <- map(sarcall, function(x) x %>%
+    filter(!is.na(hcmdt)) %>% #Remove NA values for hcmdt
+    mutate(hcmdt=ifelse(hcmdt=='15-JUN-1692','15-Jun-62',hcmdt)) %>% #Fix the one erroneous date
+    mutate(hcmdt = case_when(
+        str_detect(hcmdt, '^\\d{1,2}-[A-Za-z]{3}-\\d{2}$') ~ dmy(hcmdt), #To parse dates like 1-Feb-15
+        str_detect(hcmdt, '^\\d{4}$') ~ ymd(paste0(hcmdt,'-01-01')), #To parse year-only dates like 2015
+        TRUE ~ as.Date(NA)
+        )) %>% #Diagnosis date
+    mutate(time_since_diagnosis_years = as.numeric(difftime(event_or_censoring_date, hcmdt, units='days'))/365.25
+    ) %>%
+    mutate(age_at_diagnosis = age - time_since_diagnosis_years
+    ))
+
+#Run the time-since-diagnosis analyses
+sarcall_cox_timesincediagnosis <- map2(sarcall_time_since_diagnosis[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs',
+             predictor_type='continuous',
+             covars=c('age',covars,'sarcomere'),
+             indicator_varname ='event_indicator',
+             time_varname='time_since_diagnosis_years',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/3_TimeSinceDiagnosis/sarcall/cont/',
+             suffix=.y
+             )) %>% bind_rows()
+
+print(sarcall_cox_timesincediagnosis %>% select(term, hr, p.value, composite))
+rm(sarcall_cox_timesincediagnosis)
+```
+
+This also fits a joint model with age as timescale but including age at diagnosis as a covariate.
+
+```{r}
+#Run the analyses with age as timescale but with age at diagnosis as covariate
+sarcall_cox_cov_ageatdiagnosis <- map2(sarcall_time_since_diagnosis[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs',
+             predictor_type='continuous',
+             covars=c(covars,'sarcomere','age_at_diagnosis'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cov_ageatdiag/',
+             suffix=.y
+             )) %>% bind_rows()
+
+sarcall_cox_cov_ageatdiagnosis_sarcbinned <- map2(sarcall_time_since_diagnosis[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs',
+             predictor_type='continuous',
+             covars=c(covars,'sarcomere_binned','age_at_diagnosis'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cov_ageatdiag/sarcbinned/',
+             suffix=.y
+             )) %>% bind_rows()
+```
+
+There are PH assumption errors with age_at_diagnosis so I fit it as a time-varying coefficient and sarcomere for the secondary composite as well. I then plot all of these together.
+
+```{r}
+rm(sarcall_cox_cov_ageatdiagnosis)
+
+sarcall_cox_cov_ageatdiagnosis_primary <- cox_function(sarcall_time_since_diagnosis[[1]],
+             predictor_name='sarcomere',
+             predictor_type='categorical',
+             covars=c(covars,'cv_prs','age_at_diagnosis'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/primary/',
+             suffix='_primary_covageatdiag',time_dependent_predictor='age_at_diagnosis',age0 = median(sarcall_time_since_diagnosis[[1]]$age, na.rm=T)
+             )
+
+sarcall_cox_cov_ageatdiagnosis_secondary <- cox_function(sarcall_time_since_diagnosis[[2]],
+             predictor_name='sarcomere',
+             predictor_type='categorical',
+             covars=c(covars,'cv_prs','age_at_diagnosis'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/secondary/sarctt/',
+             suffix='_secondary_covageatdiagsarctt',time_dependent_predictor = c('age_at_diagnosis','sarcomere'), age0 = median(sarcall_time_since_diagnosis[[2]]$age, na.rm=T) #i.e. 52
+             )
+
+sarcall_cox_cov_ageatdiagnosis_sarcbinned <- map2(sarcall_time_since_diagnosis[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs',
+             predictor_type='continuous',
+             covars=c(covars,'sarcomere_binned','age_at_diagnosis'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cov_ageatdiag/sarcbinned/',time_dependent_predictor='age_at_diagnosis',age0 = median(sarcall_time_since_diagnosis[[2]]$age, na.rm=T),
+             suffix=.y
+             )) %>% bind_rows()
+
+#Replot the sarcomere comparison forest plot with this
+sarcomere_cox_plot_tb <- bind_rows(
+    sarcall_cox_cov_ageatdiagnosis_primary %>% mutate(Group= 'Sarcomere Status') %>% mutate(composite='primary'), 
+    sarcall_cox_cov_ageatdiagnosis_secondary %>% mutate(Group = 'Sarcomere Status') %>% mutate(composite='secondary'), 
+    sarcall_cox_cov_ageatdiagnosis_sarcbinned %>% mutate(Group = 'Sarcomere Variant Class')
+) %>%
+  filter(str_detect(term, 'sarcomere')) %>%
+  mutate(term = case_when(
+    term %in% c('sarcomereTRUE', 'sarcomere') ~ 'Sarcomere-positive\nvs.\nSarcomere-negative',
+    term == 'tt(sarcomere)' ~ 'Time-varying Effect of\nSarcomere-positive vs. Sarcomere-negative',
+    term == 'sarcomere_binnedVUS' ~ 'Sarcomere-VUS\nvs.\nSarcomere-negative',
+    term == 'sarcomere_binnedP_LP' ~ 'Sarcomere-P/LP\nvs.\nSarcomere-negative'
+  )) %>%
+    mutate(term = factor(term, levels=c('Sarcomere-positive\nvs.\nSarcomere-negative',
+                                    'Sarcomere-P/LP\nvs.\nSarcomere-negative',
+                                    'Sarcomere-VUS\nvs.\nSarcomere-negative'),ordered=T)) %>%
+    mutate(composite = str_to_title(composite)) %>%
+    select(term,n_events, composite, hr, hr_low, hr_high, p.value, Group) %>%
+    filter(!is.na(term)) %>%
+    mutate(adj_pvalue = p.adjust(p.value, method='fdr'))
+
+#Plot the forest plot
+forest_plot_cox(
+  sarcomere_cox_plot_tb,
+  output_dir = 'genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall',
+  suffix='_sarcomere_covageatdiag', group_palette='Set3'
+)
+
+rm(sarcomere_cox_plot_tb,sarcall_cox_cov_ageatdiagnosis_primary, sarcall_cox_cov_ageatdiagnosis_secondary, sarcall_cox_cov_ageatdiagnosis_sarcbinned)
+```
+
+# Cox Assumptions
+
+This evaluates basic assumptions of Cox regression for the mainline analyses e.g.
+
+1. Scaled Schoeneld residuals for proportional hazards assumption
+2. Martingale residuals for linearity of continuous predictors
+3. Influence plots for outliers and influential points
+
+```{r}
+sarcall_cox_agetimescale_models <- map2(sarcall[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs',
+             predictor_type='continuous',
+             covars=c('sex','sarcomere', 'PC1','PC2','PC3'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+             suffix=.y, return_model=T
+             ))
+
+sarcall_catprs_cox_agetimescale_models <- map2(sarcall_categoricalprs[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs_categorical',
+             predictor_type='categorical',
+             covars=c('sex','sarcomere', 'PC1','PC2','PC3'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cat/',
+             suffix=.y, return_model=T
+             )) 
+
+sarcall_cox_cov_ageatdiagnosis_models <- map2(sarcall_time_since_diagnosis[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs',
+             predictor_type='continuous',
+             covars=c('sex','sarcomere','cv_prs', 'PC1','PC2','PC3', 'age_at_diagnosis'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',suffix=.y, return_model=T
+             )) 
+
+# Sarcomere-positive and sarcomere-negative subgroup models
+sarcpos_cox_agetimescale_models <- map2(sarcpos[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs',
+             predictor_type='continuous',
+             covars=covars, #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcpos/cont/',
+             suffix=.y, return_model=T
+             )) 
+
+sarcneg_cox_agetimescale_models <- map2(sarcneg[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs',
+             predictor_type='continuous',
+             covars=covars, #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcneg/cont/',
+             suffix=.y, return_model=T
+             )) 
+
+sarcpos_catprs_cox_agetimescale_models <- map2(sarcall_categoricalprs[1:2] %>% map(~ filter(.x, sarcomere==T)), c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs_categorical',
+             predictor_type='categorical',
+             covars=c('sex','race'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcpos/cat/',
+             suffix=.y, return_model=T
+             ))
+
+sarcneg_catprs_cox_agetimescale_models <- map2(sarcall_categoricalprs[1:2] %>% map(~ filter(.x, sarcomere==F)), c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='cv_prs_categorical',
+             predictor_type='categorical',
+             covars=c('sex','race'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcneg/cat/',
+             suffix=.y, return_model=T
+             )) 
+
+sarcall_sarcomerebinned_cox_agetimescale_models <- map2(sarcall[1:2], c('_primary','_secondary'),
+            ~cox_function(.x, 
+             predictor_name='sarcomere_binned',
+             predictor_type='categorical',
+             covars=c('sex','cv_prs', 'PC1','PC2','PC3'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',suffix=.y, return_model=T
+             )) 
+```
+
+
+```{r}
+#Run the cox_diagnostics function on all models and then rm the models
+
+#Sarcomere-allcomer: continous PRS and categorical PRS (both with sarcomere)
+sarcall_cox_zph <- map2(sarcall_cox_agetimescale_models,c('primary','secondary'), ~ cox_diagnostics(.x, str_c('genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',.y)) %>% mutate(composite=.y)) %>% bind_rows() %>% filter(term!='GLOBAL') %>% mutate(adj_pvalue = p.adjust(p.value, method='fdr'))
+sarcall_catprs_cox_zph <- map2(sarcall_catprs_cox_agetimescale_models,c('primary','secondary'), ~ cox_diagnostics(.x, str_c('genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cat/',.y)) %>% mutate(composite=.y)) %>% bind_rows() %>% filter(term!='GLOBAL')%>% mutate(adj_pvalue = p.adjust(p.value, method='fdr'))
+
+#Sarcomere all-comer: sarcomere binned (with continuous PRS)
+sarcall_sarcomerebinned_cox_zph <- map2(sarcall_sarcomerebinned_cox_agetimescale_models,c('primary','secondary'), ~ cox_diagnostics(.x, str_c('genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/sarcbinned/',.y)) %>% mutate(composite=.y)) %>% bind_rows() %>% filter(term!='GLOBAL')%>% mutate(adj_pvalue = p.adjust(p.value, method='fdr'))
+
+#Sarcomere all-comer: age as timescale but with age at diagnosis as covariate
+sarcall_cov_ageatdiag_cox_zph <- map2(sarcall_cox_cov_ageatdiagnosis_models,c('primary','secondary'), ~ cox_diagnostics(.x, str_c('genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cov_ageatdiag/',.y)) %>% mutate(composite=.y)) %>% bind_rows() %>% filter(term!='GLOBAL')%>% mutate(adj_pvalue = p.adjust(p.value, method='fdr'))
+
+#Sarcomere-positive subgroup
+sarcpos_cox_zph <- map2(sarcpos_cox_agetimescale_models,c('primary','secondary'), ~ cox_diagnostics(.x, str_c('genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcpos/cont/',.y)) %>% mutate(composite=.y)) %>% bind_rows()%>% filter(term!='GLOBAL') %>% mutate(adj_pvalue = p.adjust(p.value, method='fdr'))
+sarcpos_catprs_cox_zph <- map2(sarcpos_catprs_cox_agetimescale_models,c('primary','secondary'), ~ cox_diagnostics(.x, str_c('genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcpos/cat/',.y)) %>% mutate(composite=.y)) %>% bind_rows() %>% filter(term!='GLOBAL') %>% mutate(adj_pvalue = p.adjust(p.value, method='fdr'))
+
+#Sarcomere-negative subgroup
+sarcneg_cox_zph <- map2(sarcneg_cox_agetimescale_models,c('primary','secondary'), ~ cox_diagnostics(.x, str_c('genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcneg/cont/',.y)) %>% mutate(composite=.y)) %>% bind_rows() %>% filter(term!='GLOBAL')%>% mutate(adj_pvalue = p.adjust(p.value, method='fdr'))
+sarcneg_catprs_cox_zph <- map2(sarcneg_catprs_cox_agetimescale_models,c('primary','secondary'), ~ cox_diagnostics(.x, str_c('genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcneg/cat/',.y)) %>% mutate(composite=.y)) %>% bind_rows()%>% filter(term!='GLOBAL') %>% mutate(adj_pvalue = p.adjust(p.value, method='fdr'))
+
+rm(sarcall_cox_agetimescale_models,
+   sarcall_catprs_cox_agetimescale_models,
+   sarcpos_cox_agetimescale_models,
+   sarcneg_cox_agetimescale_models,
+   sarcpos_catprs_cox_agetimescale_models,
+   sarcneg_catprs_cox_agetimescale_models,
+   sarcall_sarcomerebinned_cox_agetimescale_models) 
+
+rm(list=ls(pattern='zph$'))
+```
+
+# Alternate PRSs
+
+This looks for association between alternative PRSs (not the HCM risk/susceptibility PRS) with adverse clinical outcomes.
+This is based on Yang et al, 2025 which showed that risk PRS did not associate with disease-specific mortality but a PRS that was trained in the general population to model the common genetic risk of the outcomes directly performed better.
+
+```{r}
+alt_prs <- map(list.files('genetic_subset_analysis/PRS/3_output/alt_prs/3_hcmr_scores/', pattern='sscore', full.names=T), ~read_tsv(.) %>% select(HCR_IDs = IID, SCORE1_AVG) %>% dplyr::rename(cv_prs = SCORE1_AVG))
+names(alt_prs) <- str_match(basename(list.files('genetic_subset_analysis/PRS/3_output/alt_prs/3_hcmr_scores/', pattern='sscore', full.names=T)), '([^_]+)\\.sscore$')[,2]
+
+#Define the PRS of interest
+altprs_of_interest <- str_c('cv_prs_',names(alt_prs))
+
+#Rename the columns to be cv_prs_<alt_prs_name>
+alt_prs <- map2(
+  alt_prs,
+  names(alt_prs),
+  ~ .x |> rename(!!str_c("cv_prs_", .y) := cv_prs)
+)
+
+#Join each of the alt_prs to each of the sarcall datasets
+merged_alt_prs <- reduce(alt_prs, function(acc, prs_df) {
+    left_join(acc, prs_df, by = "HCR_IDs")
+  })
+rm(alt_prs)
+
+#Join the merged_alt_prs to each of the sarcall datasets
+sarcall_altprs <- map(sarcall, ~ left_join(.x, merged_alt_prs, by='HCR_IDs'))
+
+#Scale each of the alt_prs columns within the sarcall datasets
+sarcall_altprs <- map(sarcall_altprs, ~ .x |> mutate(across(starts_with("cv_prs_"), ~scale(.)[,1])))
+names(sarcall_altprs) <- c('primary','secondary','hf','va','af','stroke')
+
+rm(merged_alt_prs)
+```
+
+This runs the Cox regression over each of the alternate PRSs, for the primary and secondary composites.
+
+```{r}
+sarcall_cox_agetimescale_altprs_primarycomp <- map(c('cv_prs',altprs_of_interest),
+            ~cox_function(sarcall_altprs[[1]], 
+             predictor_name=.,
+             predictor_type='continuous',
+             covars=c(covars,'sarcomere'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+             suffix=str_c('_primary_',.)
+             )) %>% bind_rows()
+
+sarcall_cox_agetimescale_altprs_secondarycomp <- map(c('cv_prs',altprs_of_interest),
+            ~cox_function(sarcall_altprs[[2]], 
+             predictor_name=.,
+             predictor_type='continuous',
+             covars=c(covars,'sarcomere'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+             suffix=str_c('_secondary_',.)
+             )) %>% bind_rows()
+
+#Sarcomere status is time-dependent for secondary composite so refit that model with time-varying coefficient for sarcomere status
+sarcall_cox_agetimescale_altprs_secondarycomp <- map(c('cv_prs',altprs_of_interest[altprs_of_interest != 'cv_prs_af']),
+            ~cox_function(sarcall_altprs[[2]], 
+             predictor_name=.,
+             predictor_type='continuous',
+             covars=c(covars,'sarcomere'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+             suffix=str_c('_secondary_',.), time_dependent_predictor = 'sarcomere', age0 = median(sarcall_altprs[[2]]$age, na.rm=T)
+             )) %>% bind_rows()
+
+#Both sarcomere status and cv_prs_af are time-dependent for secondary composite so refit that model with time-varying coefficient for both sarcomere status and cv_prs_af
+sarcall_cox_agetimescale_altprs_secondarycomp_af <- cox_function(sarcall_altprs[[2]], 
+             predictor_name='cv_prs_af',
+             predictor_type='continuous',
+             covars=c(covars,'sarcomere'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+             suffix='_secondary_cv_prs_af', time_dependent_predictor = c('sarcomere','cv_prs_af'), age0 = median(sarcall_altprs[[2]]$age, na.rm=T)
+             )
+
+#Merge the three tibble results together
+
+sarcall_cox_agetimescale_altprs <- bind_rows(
+    sarcall_cox_agetimescale_altprs_primarycomp %>% mutate(composite='primary'),
+    sarcall_cox_agetimescale_altprs_secondarycomp %>% mutate(composite='secondary'),
+    sarcall_cox_agetimescale_altprs_secondarycomp_af %>% mutate(composite='secondary')
+) %>%
+  filter(str_detect(term, 'cv_prs'))
+
+#Plot the normal PRS as a forest plot with the alternate PRSs as well.
+sarcomere_cox_plot_tb <- sarcall_cox_agetimescale_altprs %>%
+  filter(!str_detect(term, 'tt')) %>% #Remove the time-varying coefficient terms for this visualisation
+  mutate(term = case_when(
+    term == 'cv_prs' ~ 'HCM',
+    str_detect(term, 'cv_prs_') ~ str_match(term, 'cv_prs_([A-Za-z\\d]+)')[,2],
+    T ~NA)) %>%
+    mutate(composite = str_to_title(composite)) %>%
+    mutate(Group = ifelse(term=='HCM','Continuous PRS (HCM)', 'Continuous PRS (Alt.)')) %>%
+    select(term,n_events, composite, hr, hr_low, hr_high, p.value, Group) %>%
+    filter(!is.na(term)) %>%
+    mutate(term = case_when(
+      term == 'af' ~ 'AF',
+      term == 'dbp' ~ 'DBP',
+      term == 'hf' ~ 'HF',
+      term == 'stroke' ~ 'Stroke',
+      term == 'arrest' ~ 'Cardiac Arrest (UKB)',
+      term == 'va' ~ 'Ventricular\nArrhythmia (UKB/BJJ)',
+      T ~ term
+    )) %>%
+    mutate(adj_pvalue = p.adjust(p.value, method='fdr'))
+
+#Plot the forest plot
+forest_plot_cox(
+  sarcomere_cox_plot_tb,
+  output_dir = 'genetic_subset_analysis/PRS/3_output/alt_prs/4_Severity/1_Cox/1_AgeAsTimescale/sarcall',
+  suffix='_altprs', group_palette='Set2', ylabel='PRS'
+)
+
+rm(sarcall_cox_agetimescale_altprs_primarycomp, sarcall_cox_agetimescale_altprs_secondarycomp, sarcall_cox_agetimescale_altprs_secondarycomp_af, sarcomere_cox_plot_tb)
+```
+
+This evaluates each of the specific PRSs with its specific composite e.g. HF with HF-related outcomes and AF + VA PRS with VA-related outcomes and stroke.
+
+```{r}
+#HF PRS x HF composite
+sarcall_cox_agetimescale_altprs_hfcomp <- cox_function(sarcall_altprs[['hf']], 
+             predictor_name='cv_prs_hf',
+             predictor_type='continuous',
+             covars=c(covars,'sarcomere'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/alt_prs/4_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+             suffix='hf'
+             )
+
+#AF PRS x AF composite (with tt(sarcomere) because of PH assumption violation)
+sarcall_cox_agetimescale_altprs_af <- cox_function(sarcall_altprs[['af']], 
+             predictor_name='cv_prs_af',
+             predictor_type='continuous',
+             covars=c(covars,'sarcomere'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/alt_prs/4_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+             suffix='af'
+              ,time_dependent_predictor='sarcomere', age0 = median(sarcall_altprs[['af']]$age, na.rm=T)
+             )
+
+#Stroke PRS x stroke composite
+sarcall_cox_agetimescale_altprs_strokecomp <- cox_function(sarcall_altprs[['stroke']], 
+             predictor_name='cv_prs_stroke',
+             predictor_type='continuous',
+             covars=c(covars,'sarcomere'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/alt_prs/4_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+             suffix='stroke'
+             ) 
+
+#VA/CardArrest PRS x VA composite which VA needs tt(sex)
+sarcall_cox_agetimescale_altprs_vacomp <- map(c('cv_prs_arrest','cv_prs_va'), ~ cox_function(sarcall_altprs[['va']], 
+             predictor_name=.,
+             predictor_type='continuous',
+             covars=c(covars,'sarcomere'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/alt_prs/4_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+             suffix='va', time_dependent_predictor='sex', age0 = median(sarcall_altprs[['va']]$age, na.rm=T)
+             )) %>% bind_rows()
+
+#Also run the HCM PRS x each of these composites but HCM PRS x AF needs tt(sarcomere) and HCM PRS x VA needs tt(sex)
+sarcall_cox_agetimescale_hcmprs_customcomp <- map2(sarcall_altprs[c('hf','stroke')],c('hf','stroke'), ~cox_function(.x, 
+              predictor_name='cv_prs',
+              predictor_type='continuous',
+              covars=c(covars,'sarcomere'), #No age because it is used as timescale
+              indicator_varname ='event_indicator',
+              time_varname='age_at_event_or_censoring',
+              output_dir='genetic_subset_analysis/PRS/3_output/alt_prs/4_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+              suffix=str_glue('{.y}')
+              )) %>% bind_rows()
+
+sarcall_cox_agetimescale_hcmprs_customcomp <- bind_rows(sarcall_cox_agetimescale_hcmprs_customcomp,
+          cox_function(sarcall_altprs[['af']],
+              predictor_name='cv_prs',
+              predictor_type='continuous',
+              covars=c(covars,'sarcomere'), #No age because it is used as timescale
+              indicator_varname ='event_indicator',
+              time_varname='age_at_event_or_censoring',
+              output_dir='genetic_subset_analysis/PRS/3_output/alt_prs/4_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+              time_dependent_predictor='sarcomere', age0= median(sarcall_altprs[['af']]$age, na.rm=T),
+              suffix='af'))
+
+sarcall_cox_agetimescale_hcmprs_customcomp <- bind_rows(sarcall_cox_agetimescale_hcmprs_customcomp,
+          cox_function(sarcall_altprs[['va']],
+              predictor_name='cv_prs',
+              predictor_type='continuous',
+              covars=c(covars,'sarcomere'), #No age because it is used as timescale
+              indicator_varname ='event_indicator',
+              time_varname='age_at_event_or_censoring',
+              output_dir='genetic_subset_analysis/PRS/3_output/alt_prs/4_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+              time_dependent_predictor='sex', age0= median(sarcall_altprs[['va']]$age, na.rm=T),
+              suffix='va'))
+
+#Merge all the results together
+sarcall_cox_agetimescale_customcomp <- bind_rows(
+  sarcall_cox_agetimescale_hcmprs_customcomp, sarcall_cox_agetimescale_altprs_hfcomp, sarcall_cox_agetimescale_altprs_af, sarcall_cox_agetimescale_altprs_strokecomp,sarcall_cox_agetimescale_altprs_vacomp
+) %>%
+  filter(str_detect(term, 'cv_prs'))
+
+#Plot the normal PRS as a forest plot with the alternate PRSs as well.
+sarcomere_cox_plot_tb <- sarcall_cox_agetimescale_customcomp %>%
+  mutate(term = case_when(
+    term == 'cv_prs' ~ 'HCM',
+    str_detect(term, 'cv_prs_') ~ str_match(term, 'cv_prs_([A-Za-z\\d]+)')[,2],
+    T ~NA)) %>%
+    mutate(composite = case_when(
+      composite == 'hf' ~ 'HF',
+      composite == 'va' ~ 'VA',
+      composite == 'stroke' ~ 'Stroke',
+      composite == 'af' ~'AF',
+      T ~ composite
+    )) %>%
+    mutate(Group = ifelse(term=='HCM','Continuous PRS (HCM)', 'Continuous PRS (Alt.)')) %>%
+    select(term,n_events, composite, hr, hr_low, hr_high, p.value, Group) %>%
+    filter(!is.na(term)) %>%
+    mutate(term = case_when(
+      term == 'af' ~ 'AF',
+      term == 'hf' ~ 'HF',
+      term == 'stroke' ~ 'Stroke',
+      term == 'arrest' ~ 'Cardiac Arrest (UKB)',
+      term == 'va' ~ 'Ventricular\nArrhythmia (UKB/BJJ)',
+      T ~ term
+    )) %>%
+    mutate(term = factor(term, levels=c('HCM','HF','VA','AF','Stroke','Cardiac Arrest (UKB)','Ventricular\nArrhythmia (UKB/BJJ)'), ordered=T)) %>%
+    mutate(adj_pvalue = p.adjust(p.value, method='fdr'))
+
+#Plot the forest plot
+forest_plot_cox(
+  sarcomere_cox_plot_tb,
+  output_dir = 'genetic_subset_analysis/PRS/3_output/alt_prs/4_Severity/1_Cox/1_AgeAsTimescale/sarcall',
+  suffix='_altprs_customcomp', group_palette='Set2', ylabel = 'PRS'
+)
+
+rm(sarcall_cox_agetimescale_hcmprs_customcomp,
+   sarcall_cox_agetimescale_altprs_hfcomp,
+   sarcall_cox_agetimescale_altprs_vacomp,
+   sarcall_cox_agetimescale_altprs_strokecomp)
+```
+
+This adds Kaplan-Meier curves for categorical versions of these PRS x custom composite signals which are significant.
+
+```{r}
+sarcall_afprs_categorical <- prs_categoriser(sarcall_altprs, 'cv_prs_af', quantile_thresholds=c(0.2,0.8))
+sarcall_hfprs_categorical <- prs_categoriser(sarcall_altprs, 'cv_prs_hf', quantile_thresholds=c(0.2,0.8))
+
+km_survival_curv_plotter(sarcall_afprs_categorical[['af']],'cv_prs_af_categorical','event_indicator', 'age_at_event_or_censoring', 'genetic_subset_analysis/PRS/3_output/alt_prs/4_Severity/2_KaplanMeier/1_AgeAsTimescale/sarcall/', output_suffix='_afcomp_afprs', ylimits=list(c(60,100),c(0.0,0.4),c(0.0,0.4)))
+
+km_survival_curv_plotter(sarcall_hfprs_categorical[['hf']],'cv_prs_hf_categorical','event_indicator', 'age_at_event_or_censoring', 'genetic_subset_analysis/PRS/3_output/alt_prs/4_Severity/2_KaplanMeier/1_AgeAsTimescale/sarcall/', output_suffix='_hfcomp_hfprs', ylimits=list(c(60,100),c(0.0,0.4),c(0.0,0.4)))
+
+rm(sarcall_cox_agetimescale_altprs, sarcall_cox_agetimescale_altprs_af, sarcall_cox_agetimescale_altprs_vacomp, sarcall_cox_agetimescale_customcomp)
+```
+
+Repeat for a quick look at whether Ig PRS associates with composites.
+
+```{r}
+alt_prs <- map(list.files('genetic_subset_analysis/PRS/3_output/alt_prs/3_hcmr_scores/Ig/', pattern='sscore', full.names=T), ~read_tsv(.) %>% select(HCR_IDs = IID, SCORE1_AVG) %>% dplyr::rename(cv_prs = SCORE1_AVG))
+names(alt_prs) <- str_match(basename(list.files('genetic_subset_analysis/PRS/3_output/alt_prs/3_hcmr_scores/Ig', pattern='sscore', full.names=T)), '([^_]+)\\.sscore$')[,2]
+
+#Define the PRS of interest
+altprs_of_interest <- str_c('cv_prs_',names(alt_prs))
+
+#Rename the columns to be cv_prs_<alt_prs_name>
+alt_prs <- map2(
+  alt_prs,
+  names(alt_prs),
+  ~ .x |> rename(!!str_c("cv_prs_", .y) := cv_prs)
+)
+
+#Join each of the alt_prs to each of the sarcall datasets
+merged_alt_prs <- reduce(alt_prs, function(acc, prs_df) {
+    left_join(acc, prs_df, by = "HCR_IDs")
+  })
+rm(alt_prs)
+
+#Join the merged_alt_prs to each of the sarcall datasets
+sarcall_altprs <- map(sarcall, ~ left_join(.x, merged_alt_prs, by='HCR_IDs'))
+
+#Scale each of the alt_prs columns within the sarcall datasets
+sarcall_altprs <- map(sarcall_altprs, ~ .x |> mutate(across(starts_with("cv_prs_"), ~scale(.)[,1])))
+names(sarcall_altprs) <- c('primary','secondary','hf','va','af','stroke')
+
+rm(merged_alt_prs)
+```
+
+```{r}
+sarcall_cox_agetimescale_altprs_primarycomp <- map(c('cv_prs',altprs_of_interest),
+            ~cox_function(sarcall_altprs[[1]], 
+             predictor_name=.,
+             predictor_type='continuous',
+             covars=c(covars,'sarcomere', 'PC1','PC2','PC3'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+             suffix=str_c('_primary_',.)
+             )) %>% bind_rows()
+
+sarcall_cox_agetimescale_altprs_secondarycomp <- map(c('cv_prs',altprs_of_interest),
+            ~cox_function(sarcall_altprs[[2]], 
+             predictor_name=.,
+             predictor_type='continuous',
+             covars=c(covars,'sarcomere', 'PC1','PC2','PC3'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+             suffix=str_c('_secondary_',.)
+             )) %>% bind_rows()
+
+#Sarcomere status is time-dependent for secondary composite so refit that model with time-varying coefficient for sarcomere status
+sarcall_cox_agetimescale_altprs_secondarycomp <- map(c('cv_prs',altprs_of_interest),
+            ~cox_function(sarcall_altprs[[2]], 
+             predictor_name=.,
+             predictor_type='continuous',
+             covars=c(covars,'sarcomere', 'PC1','PC2','PC3'), #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             output_dir='genetic_subset_analysis/PRS/3_output/2_Severity/1_Cox/1_AgeAsTimescale/sarcall/cont/',
+             suffix=str_c('_secondary_',.), time_dependent_predictor = 'sarcomere', age0 = median(sarcall_altprs[[2]]$age, na.rm=T)
+             )) %>% bind_rows()
+
+#Merge the two tibble results together
+
+sarcall_cox_agetimescale_altprs <- bind_rows(
+    sarcall_cox_agetimescale_altprs_primarycomp %>% mutate(composite='primary'),
+    sarcall_cox_agetimescale_altprs_secondarycomp %>% mutate(composite='secondary')
+) %>%
+  filter(str_detect(term, 'cv_prs'))
+
+#Plot the normal PRS as a forest plot with the alternate PRSs as well.
+sarcomere_cox_plot_tb <- sarcall_cox_agetimescale_altprs %>%
+  mutate(term = case_when(
+    term == 'cv_prs' ~ 'HCM',
+    str_detect(term, 'cv_prs_') ~ str_match(term, 'cv_prs_([A-Za-z\\d]+)')[,2],
+    T ~NA)) %>%
+    mutate(composite = str_to_title(composite)) %>%
+    mutate(Group = ifelse(term=='HCM','Continuous PRS (HCM)', 'Continuous PRS (Alt.)')) %>%
+    select(term,n_events, composite, hr, hr_low, hr_high, p.value, Group) %>%
+    filter(!is.na(term)) %>%
+    mutate(adj_pvalue = p.adjust(p.value, method='fdr'))
+
+#Plot the forest plot
+forest_plot_cox(
+  sarcomere_cox_plot_tb,
+  output_dir = 'genetic_subset_analysis/PRS/3_output/alt_prs/4_Severity/1_Cox/1_AgeAsTimescale/sarcall',
+  suffix='_altprs_Ig', group_palette='Set2', ylabel='PRS'
+)
+
+rm(sarcall_cox_agetimescale_altprs_primarycomp, sarcall_cox_agetimescale_altprs_secondarycomp, sarcall_cox_agetimescale_altprs)
+```

@@ -1,0 +1,233 @@
+---
+title: "Comparison of HCMR Case Rare-Variant Carriers on Endophenotype - Multi-Variant Individuals Analysis"
+author: "Jonathan Chan"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide   
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(viridis)
+library(factoextra)
+library(tictoc)
+library(readxl)
+
+rm(list=ls())
+
+theme_set(theme_classic(base_size=14))
+
+source('genetic_subset_analysis/common/hcmr_endophenotype_functions.R')
+```
+
+## Import
+
+```{r import, echo=F}
+hcmr_sarcpos_tb <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_sarcpos_pheno_rarevarclasses_transform.tsv')
+hcmr_sarcpos_tb_notransform_lgelogged <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_sarcpos_pheno_rarevarclasses_notransform_lgelogged.tsv')
+hcmr_sarcpos_tb_notransform <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_sarcpos_pheno_rarevarclasses_notransform.tsv')
+```
+
+## Phenotypes for Comparison
+
+The following phenotypes will be analysed each reflecting some component of HCM disease.
+
+- Hypertrophy: wallthkmax; lvmassi
+- Fibrosis: lge_total; ecvfwhole
+- Hypercontractility: LVEF (from CMR) and LV strain parameters (lvs_ellmean; eccmean; errmean)
+
+Note that lge_total is treated both as a continuous and a discrete trait via binning.
+
+```{r phenotype_tb}
+phenos_of_interest <- c('lge_total','wallthkmax','lvmassi','lge_total','ecvfwhole','lvef','lvs_ellmean','lvs_eccmean','lvs_errmean')
+contphenos <- phenos_of_interest
+
+continuous_param_list <- list(
+  c('wallthkmax','Maximal LV Wall Thickness (mm)'),
+  c('lvmassi','LV Mass Index (g/m2)'),
+  c('lge_total','LGE Mass over All Segments / LV Mass (%)'),
+  c('ecvfwhole','Whole LV Extracellular Volume Fraction (%)'),
+  c('lvef','LV Ejection Fraction (%)'),
+  c('lvs_ellmean','-Longitudinal LV Strain'),
+  c('lvs_eccmean','-Circumferential LV Strain'),
+  c('lvs_errmean','Radial LV Strain')
+  # c('entropy_LVWall_MAG_adj','Entropy of LV Wall from MAG LGE Images'),
+  # c('entropy_LVWall_PSIR_adj','Entropy of LV Wall from PSIR LGE Images')
+)
+
+scaled_cols <- c('lge_total')
+
+names(continuous_param_list) <- map_chr(continuous_param_list, ~.[[1]])
+
+label_tb <- read_tsv('output/data/combo_labels_20260123.tsv')
+```
+
+# Multi-Variant Individuals Analysis
+
+This section analyses the phenotypes of the individuals who have more than one rare variant dosage in KT_HCMR19.
+
+This subset can be broken down into a few sub-types:
+
+1) Homozygotes for a particular variant
+2) Heterozygotes for 2 or more variants
+
+```{r multi-dosage individuals}
+
+all_merged_overlapvars_tb <- read_tsv('genetic_subset_analysis/RareVar/3_output/individual_class/overlap_variants/hcmr_KT_overlapvariants.tsv') %>%
+  filter(HCR_ID %in% hcmr_sarcpos_tb$HCR_IDs) #Filter only to the 882 sarcomere-positive individuals
+
+#Identify the number of homozygotes and the number of multiple heterozygotes
+homozygotes <- all_merged_overlapvars_tb %>% 
+  filter(dosage1==2 | dosage2==2) #There are 2 homozygotes 
+multi_het <- all_merged_overlapvars_tb %>%
+  filter(!is.na(dosage2))
+
+print(str_c('There are', nrow(homozygotes), 'homozygotes and',length(unique(multi_het$HCR_ID)),'multiple heterozygotes with ', length(intersect(homozygotes$HCR_ID, multi_het$HCR_ID)),'individual being both so technically',nrow(homozygotes)+length(unique(multi_het$HCR_ID))-length(intersect(homozygotes$HCR_ID, multi_het$HCR_ID)), 'individuals with >1 dose of a rare variant', sep=' '))
+
+#These are all the individuals with >1 dosage of rare variant
+multi_dosage_ids <- unique(c(homozygotes$HCR_ID,multi_het$HCR_ID))
+```
+
+Then generate the phenotype tbs for the single vs. multiple-variant comparison.
+
+```{r}
+#Generate the phenotype tb for comparison
+multi_vs_single_tb <- hcmr_sarcpos_tb %>%
+  mutate(group = ifelse(HCR_IDs %in% multi_dosage_ids, 'Multi','Single')) %>%
+  mutate(group=factor(group, levels=c('Single','Multi'))) 
+
+multi_vs_single_tb_notransform <- hcmr_sarcpos_tb_notransform%>%
+  mutate(group = ifelse(HCR_IDs %in% multi_dosage_ids, 'Multi','Single')) %>%
+  mutate(group=factor(group, levels=c('Single','Multi')))
+```
+
+## Single vs. Multiple Variant Individual Comparison
+
+```{r multi-dosage individuals_comparison}
+#This tests all individuals with >1 rare variant dosage against the other sarcomere-positive individuals
+
+#Linear regression to adjust for age/sex etc. results
+multi_vs_single_lm_results <- map(continuous_param_list, ~linear_logistic_regression_modeller(multi_vs_single_tb, .,'Multi','Single', covars=c('age','sex','bmi','FieldStrength'))) %>% bind_rows()  %>%
+  mutate(comparison = str_c(group1, ' vs. ', group2)) %>%
+  left_join(select(label_tb,Variable, Label),by=c('pheno'='Variable')) %>%
+  mutate(estimate = - estimate) %>% #Invert the estimate to reflect group1 vs. group2 
+  select(-term) %>%
+  mutate(Label_short = case_when(
+    pheno == 'wallthkmax' ~ 'maxLVWT',
+    pheno == 'lvmassi' ~ 'LVMi',
+    pheno == 'lge_total' ~ 'LGE',
+    pheno == 'ecvfwhole' ~ 'ECVF',
+    pheno == 'lvef' ~ 'LVEF',
+    pheno == 'lvs_ellmean' ~ '-LongStrain',
+    pheno == 'lvs_eccmean' ~ '-CircStrain',
+    pheno == 'lvs_errmean' ~ 'RadStrain'
+  )) %>%
+    mutate(Label_short = str_c(Label_short, ' (', comparison,')')) %>%
+  mutate(Label= case_when(
+      pheno %in% scaled_cols ~ str_replace(Label, '\\([^ ]+\\)$', '(SD(Log(%)))'),
+      pheno %in% phenos_of_interest ~ str_replace(Label, '\\([^ ]+\\)$', '(SD)')))
+
+multi_vs_single_lm_results <- colour_hardcoder(multi_vs_single_lm_results)
+
+
+summary_plotter(multi_vs_single_lm_results,output_path='genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/MultiVariant/',  mtc='fdr',test='LinearRegression',xlabel='Coefficient Estimate',confint=T, label=T, comporder = c('Multi vs. Single'))
+
+write_tsv(multi_vs_single_lm_results,'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/MultiVariant/allmulti_vs_single_lm_results.tsv')
+
+summary_plotter(multi_vs_single_lm_results,output_path='genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/MultiVariant/',  mtc='fdr',test='LinearRegression',xlabel='Coefficient Estimate',confint=T, poster=T, comporder = c('Multi vs. Single'), height=6, width=10)
+```
+
+This plots the summary plot as a facetted forest plot instead.
+
+```{r}
+multi_vs_single_lm_results <- read_tsv('genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/MultiVariant/allmulti_vs_single_lm_results.tsv') %>%
+  mutate(Label_short = str_match(Label_short, '(^[^()]+)')[,2]) %>%
+  select(-Label) %>%
+  dplyr::rename(Label = Label_short, predictor_label = comparison) %>%
+  mutate(adj_p = p.adjust(pval, method='BH'))  %>%
+  mutate(predictor_reported = predictor_label)
+
+summary_forest_plotter(multi_vs_single_lm_results, 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/MultiVariant/', file_name = 'LinearRegression_multivssingle_summary_forestplot_fdr.png', sigphenos_only=F,facet_order=c(c('Multi vs. Single')), height = 6, width=4)
+```
+
+```{r}
+#This repeats with the non-transformed (includng no LGE logged)
+multi_vs_single_lm_results_notransform <- map(continuous_param_list, ~linear_logistic_regression_modeller(multi_vs_single_tb_notransform, .,'Multi','Single', covars=c('age','sex','bmi','FieldStrength'))) %>% bind_rows()  %>%
+  mutate(comparison = str_c(group1, ' vs. ', group2)) %>%
+  left_join(select(label_tb,Variable, Label),by=c('pheno'='Variable')) %>%
+  mutate(estimate = - estimate) %>% #Invert the estimate to reflect group1 vs. group2 
+  select(-term) %>%
+  mutate(Label_short = case_when(
+    pheno == 'wallthkmax' ~ 'maxLVWT',
+    pheno == 'lvmassi' ~ 'LVMi',
+    pheno == 'lge_total' ~ 'LGE',
+    pheno == 'ecvfwhole' ~ 'ECVF',
+    pheno == 'lvef' ~ 'LVEF',
+    pheno == 'lvs_ellmean' ~ '-LongStrain',
+    pheno == 'lvs_eccmean' ~ '-CircStrain',
+    pheno == 'lvs_errmean' ~ 'RadStrain'
+  )) %>%
+    mutate(Label_short = str_c(Label_short, ' (', comparison,')'))
+
+write_tsv(multi_vs_single_lm_results_notransform,'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/MultiVariant/allmulti_vs_single_lm_notransform_results.tsv')
+```
+
+```{r}
+#Wilcoxon rank sum test on nontransformed tibble results for those which are MTC-significant
+
+multi_vs_single_wilcoxon_results <- map(
+  continuous_param_list[names(continuous_param_list) %in% c('lge_total')],
+  ~plot_tester(input_tb=multi_vs_single_tb_notransform,.,group1_name='Multi', group2_name='Single', output_path='genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/2_Wilcoxon/MultiVariant/')
+  ) %>% 
+    bind_rows()
+```
+
+These 26 individuals can be sub-categorised into
+
+<!-- 1) 1x homozygote for MYBPC3 P (frameshift) + heterozygote for VUS  -->
+<!-- 2) 1x homozygotes for (MYBPC3) P/LP  with MYBPC3 stop-gain -->
+Above 2 are defunct and false positive.
+
+3) 2x homozygotes for MYL3 VUS
+
+4) 3x double heterozygotes for 2x different P/LP variants (1x LP MYH7 + LP TNNI3; 1X)
+5) 19x double heterozygotes for 1x P/LP variant and 1x VUS variant
+6) 2x double heterozygotes for 2x VUS variants
+
+```{r multi_dosage_subcategorisation}
+
+cat1 <- multi_vs_single_tb_notransform %>%
+  filter(HCR_IDs %in% filter(homozygotes, Curation1 %in% c('P','LP'), dosage1==2, dosage2==1)$HCR_ID)
+
+cat2 <- multi_vs_single_tb_notransform %>%
+  filter(HCR_IDs %in% filter(homozygotes, Curation1 %in% c('P','LP'), dosage1==2, is.na(dosage2))$HCR_ID
+  )
+cat3 <- multi_vs_single_tb_notransform %>%
+  filter(HCR_IDs %in% filter(homozygotes, Curation1 %in% c('VUS','VUS_FP'), dosage1==2, is.na(dosage2))$HCR_ID)
+
+cat4 <- multi_vs_single_tb_notransform %>%
+  filter(HCR_IDs %in% filter(all_merged_overlapvars_tb,Curation1 %in% c('P','LP'),Curation2 %in% c('P','LP'),dosage1==1, dosage2==1)$HCR_ID)
+
+cat5 <- multi_vs_single_tb_notransform %>%
+  filter(
+    HCR_IDs %in% filter(all_merged_overlapvars_tb,Curation1 %in% c('P','LP'),Curation2 %in% c('VUS','VUS_FP'),dosage1==1, dosage2==1)$HCR_ID |
+    HCR_IDs %in% filter(all_merged_overlapvars_tb,Curation2 %in% c('P','LP'),Curation1 %in% c('VUS','VUS_FP'),dosage1==1, dosage2==1)$HCR_ID)
+
+cat6 <- multi_vs_single_tb_notransform %>%
+  filter(HCR_IDs %in% filter(all_merged_overlapvars_tb,Curation1 %in% c('VUS','VUS_FP'),Curation2 %in% c('VUS','VUS_FP'),dosage1==1, dosage2==1)$HCR_ID)
+
+print(str_glue('Category 1 (Homozygous P/LP + Heterozygous): {nrow(cat1)} individuals\n Category 2 (Homozygous P/LP): {nrow(cat2)} individuals\n Category 3 (Homozygous VUS): {nrow(cat3)} individuals\n Category 4 (Double Heterozygous P/LP): {nrow(cat4)} individuals\n Category 5 (Heterozygous P/LP + Heterozygous VUS): {nrow(cat5)} individuals\n Category 6 (Double Heterozygous VUS): {nrow(cat6)} individuals'))
+
+all_cats <- c(cat1$HCR_IDs, cat2$HCR_IDs, cat3$HCR_IDs, cat4$HCR_IDs, cat5$HCR_IDs, cat6$HCR_IDs)
+
+#Which individuals are not categorised?
+uncategorised_ids <- setdiff(multi_dosage_ids, all_cats)
+print(uncategorised_ids) #Should be none
+
+rm(homozygotes, multi_het, multi_vs_single_lm_results, multi_vs_single_wilcoxon_results, multi_dosage_ids, multi_vs_single_tb, multi_vs_single_tb_notransform)
+
+rm(list=ls(pattern='cat'))
+
+```

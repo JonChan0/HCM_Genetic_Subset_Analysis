@@ -1,0 +1,495 @@
+---
+title: "Preprocessing of HCMR Outcomes "
+author: "Jonathan Chan"
+date: "2026-01-20"
+output: 
+  html_document:
+    code_folding: hide   
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(viridis)
+library(tictoc)
+library(kableExtra)
+library(readxl)
+library(ggrepel)
+
+rm(list=ls())
+
+theme_set(theme_classic(base_size=14))
+```
+
+## Import
+```{r import}
+#This flag is crucial to determine whether you want to use 2558 OR 2446 individuals (former = not common filtered) - See the Flowchart and hcmr_overall_preprocessor.Rmd
+
+hcmr_n <- 2558 #For rare variant subset analysis (sarcomere-positive focus analysis) Note this later filters to only sarcomere == T (915)
+# hcmr_n <- 2446 #For PRS and rare genetic analysis (sarcomere-all)
+
+if(hcmr_n == 2558){
+  hcmr_ids <- read_tsv(
+  'genetic_subset_analysis/common/output/data/hcmr_agesex_rare_filtered_2558.tsv')
+} else if (hcmr_n ==2446){
+  hcmr_ids <- read_tsv('genetic_subset_analysis/common/output/data/hcmr_agesex_rare_common_filtered_2446.tsv')
+} 
+```
+
+```{r}
+#This imports in the preprocessed HCMR baseline and image data
+total_df_notransform <- readRDS('output/data/total_notransform_nogenofilter_df.rds') %>% 
+  select(-starts_with('eos')) %>% #Remove any previous eos variables if they exist
+  filter(sitePatID %in% hcmr_ids$sitePatID) #Filter to only the individuals in hcmr_ids
+
+#Convert false positive individuals to sarcomere-negative individuals (due to false positive MYBPC3-VUS variants)
+falsepositive_mybpc3_vus_individuals <- readRDS('genetic_subset_analysis/common/falsepositive_mybpc3_vus_individuals.rds')
+total_df_notransform <- total_df_notransform %>%
+  mutate(sarcomere = ifelse(HCR_IDs %in% falsepositive_mybpc3_vus_individuals, FALSE, sarcomere))
+
+if(hcmr_n == 2558){
+  total_df_notransform <- filter(total_df_notransform, sarcomere==T)
+}
+```
+
+This imports in the final follow-up/censoring/end-of-study data.
+```{r}
+hcmr_eos <- read_excel('data/HCMR_2026_01/HCMRBaselineDataset_2025-10-14.xlsx', sheet='data') %>%
+  select(sitePatID, starts_with('eos')) 
+
+total_df_notransform <- left_join(total_df_notransform, hcmr_eos, by='sitePatID')
+
+print(unique(total_df_notransform$eosyn))
+
+print(str_glue('Number of individuals which did not complete study: {nrow(filter(total_df_notransform, eosyn==0))}'))
+print(str_glue('Number of individuals with non-NA date of study completion/discontinuation: {sum(!is.na(total_df_notransform$eosdt))}'))
+
+#Double check that there aren't any individuals who have non-NA eosdt but eosyn==1
+print(nrow(filter(total_df_notransform, !is.na(eosdt) & eosyn==1)))
+
+#Checking the 1 individuals with missing eosdt but eosyn==0
+missing_eosdt <- filter(total_df_notransform, is.na(eosdt) & eosyn==0) %>%
+  select(sitePatID, eosyn, eosn, eosdt)
+
+#Remove the 1 individuals with missing eosdt but eosyn==0 (i.e. didn't complete study but no dropout date)
+total_df_notransform <- filter(total_df_notransform, !sitePatID %in% missing_eosdt$sitePatID) 
+
+```
+
+
+This imports in the outcome data.
+```{r}
+#This imports in the HCMR outcomes files
+hcmr_adj_dict <- read_excel('data/HCMR_2026_01/HCMRAdjDataset_2025-10-14.xlsx',sheet='dictionary') %>% mutate(Type = case_when(str_detect(Type, 'char') ~ 'text',
+                    str_detect(Type, 'int') ~ 'numeric',
+                    str_detect(Type, 'date') ~ 'text',
+                    TRUE ~ 'text')) %>%
+  filter(!Name %in% c('OxfordID','GENE','sitePatID2')) #Remove unneeded columns
+
+hcmr_adj <- read_excel('data/HCMR_2026_01/HCMRAdjDataset_2025-10-14.xlsx',sheet='data', col_types = hcmr_adj_dict$Type) %>% #This lists all the events that occurred
+  mutate(eventDate = as_date(eventDate))
+
+hcmr_fup_dataset <- read_excel('data/HCMR_2026_01/HCMRFUPDataset_2025-12-05.xlsx',sheet='data Long', range= cell_cols("A:R"))
+hcmr_fup_long_dict <- read_excel('data/HCMR_2026_01/HCMRFUPDataset_2025-12-05.xlsx',sheet='dictionary',range= cell_cols("A:F")) %>%
+  dplyr::rename(Type=`Field Type`) %>% 
+  filter(Variable %in% colnames(hcmr_fup_dataset)) %>%
+  mutate(Type = case_when(
+                    str_detect(Type, 'date') ~ 'date',
+                    str_detect(Type, 'char') ~ 'text',
+                    str_detect(Type, 'int') ~ 'numeric',
+                    TRUE ~ 'text')) 
+
+lvad_placement_events_part1 <- read_excel('data/HCMR_2026_01/HCMRFUPDataset_2025-12-05.xlsx',sheet='data Long', range= cell_cols("A:E"),col_types = hcmr_fup_long_dict$Type[1:5]) #This is the long-version of the follow-up dataset which lists events by follow-up visit
+lvad_placement_events_part2 <- read_excel('data/HCMR_2026_01/HCMRFUPDataset_2025-12-05.xlsx',sheet='data Long', range= cell_cols("G:R"),col_types = hcmr_fup_long_dict$Type[6:17]) #This is the long-version of the follow-up dataset which lists events by follow-up visit
+lvad_placement_events <- bind_cols(lvad_placement_events_part1, lvad_placement_events_part2)
+rm(hcmr_adj_dict, hcmr_fup_long_dict, lvad_placement_events_part1, lvad_placement_events_part2)
+
+lvad_placement_events <- lvad_placement_events %>%
+  select(sitePatID, fulvad, fulvaddt) %>%
+  mutate(fulvad = as.numeric(fulvad),
+         fulvaddt = as_date(fulvaddt)) %>%
+  filter(fulvad==1) #Only filter for those with LVAD placement
+```
+
+This extracts the last follow-up date for each patient and appends it to the hcmr_adj tibble.
+
+```{r}
+last_fup <- hcmr_fup_dataset %>%
+  filter(fudt <= as_date('2025-12-05')) %>%  #Remove all fudt later than 2025-12-05 i.e. the date of the file)
+  group_by(sitePatID) %>%
+    slice_max(order_by = fudt, n = 1, with_ties = FALSE) %>% #Extracts the last date of follow-up for each patient
+    ungroup() %>%
+  rename('last_fudt'='fudt') %>%
+  mutate(last_fudt = as_date(last_fudt)) %>%
+  select(sitePatID,last_fudt)
+
+print(summary(last_fup$last_fudt))
+
+print(str_glue('Number of NA values for last_fudt: {sum(is.na(last_fup$last_fudt))} of {length(unique(last_fup$sitePatID))} patients'))
+
+total_df_notransform <- total_df_notransform %>%
+  left_join(last_fup, by='sitePatID')
+
+print(str_glue('Number of NA values in patients for last_fudt: {sum(is.na(total_df_notransform$last_fudt))}'))
+print(str_glue('Number of 915 patients with NA last_fudt and eosdt: {nrow(filter(total_df_notransform, is.na(last_fudt) & is.na(eosdt)))}')) #Yeah so only that one individual with a NA last_fudt in the original last_fup. Double checked the Excel and all empty fields for this individual in the follow-up dataset
+  
+rm(last_fup)
+```
+
+
+### Primary and Secondary Composite Definition
+
+This outlines the outcomes within the primary composite and the secondary composite and for each composite, it creates a tibble ready for survival analysis.
+```{r}
+#Primary Outcome
+primary_comp_events <- hcmr_adj %>%
+  left_join(lvad_placement_events, by='sitePatID') %>%
+  filter(criteriamet ==1) %>% #Only filter for those which meet the adjudicated criteria
+  select(-criteriamet) %>%
+  filter(death_cause == 1 | # Cardiac death
+         vtach == 1 | #Ventricular tachyarrhythmia event
+         transplant ==1 | #Heart transplant
+        fulvad == 1 #LVAD placement
+         ) 
+
+#Create a tibble with the following columns: 1) sitePatID 2) event and 3) event_date
+primary_comp_events_surv <- primary_comp_events |>
+  transmute(
+    sitePatID,
+    event = case_when(
+      death_cause == 1 ~ "cardiac_death",
+      vtach == 1 ~ "vtach",
+      transplant == 1 ~ "transplant",
+      fulvad == 1 ~ "lvad",
+      TRUE ~ NA_character_
+    ),
+    event_date = case_when(
+      death_cause == 1 ~ eventDate,
+      vtach == 1 ~ eventDate,
+      transplant == 1 ~ eventDate,
+      fulvad == 1 ~ fulvaddt,
+      TRUE ~ as_date(NA_character_)
+    )
+  ) |>
+  filter(!is.na(event), !is.na(event_date))
+```
+
+
+```{r}
+#Secondary outcomes
+secondary_comp_events <- hcmr_adj %>%
+  left_join(lvad_placement_events, by='sitePatID') %>%
+  filter(criteriamet ==1) %>% #Only filter for those which meet the adjudicated criteria
+  select(-criteriamet) %>%
+  filter( #Primary Outcomes
+        death_cause == 1 | # Cardiac death
+         vtach == 1 | #Ventricular tachyarrhythmia event
+         transplant ==1 | #Heart transplant
+        fulvad == 1 | #LVAD placement
+        #Secondary outcomes
+        death_cause ==2 | #Non-cardiac death
+        hf==1 | #Heart failure hospitlisation
+        afib ==1 |  #Atrial fibrillation
+        (death==0 & stroke==1) #Non-fatal stroke
+         )
+#Create a tibble with the following columns: 1) sitePatID 2) event and 3) event_date
+secondary_comp_events_surv <- secondary_comp_events %>%
+  transmute(
+    sitePatID,
+    event = case_when(
+      death_cause == 1 ~ "cardiac_death",
+      vtach == 1 ~ "vtach",
+      transplant == 1 ~ "transplant",
+      fulvad == 1 ~ "lvad",
+      death_cause == 2 ~ "non_cardiac_death",
+      hf == 1 ~ "heart_failure_hospitalisation",
+      afib == 1 ~ "atrial_fibrillation",
+      (death == 0 & stroke == 1) ~ "non_fatal_stroke",
+      TRUE ~ NA_character_
+    ),
+    event_date = case_when(
+      death_cause == 1 ~ eventDate,
+      vtach == 1 ~ eventDate,
+      transplant == 1 ~ eventDate,
+      fulvad == 1 ~ fulvaddt,
+      death_cause == 2 ~ eventDate,
+      hf == 1 ~ eventDate,
+      afib == 1 ~ eventDate,
+      (death == 0 & stroke == 1) ~ eventDate,
+      TRUE ~ as_date(NA_character_)
+    )
+  ) %>%
+  filter(!is.na(event), !is.na(event_date))
+
+#Check which rows are in the hcmr_adj but not in the secondary_comp_events_surv
+missing_secondary_events <- anti_join(hcmr_adj, secondary_comp_events_surv, by = "sitePatID") #Either death_cause unknown or no)
+rm(secondary_comp_events, primary_comp_events)
+
+print(sum(is.na(primary_comp_events_surv$event_date)))
+print(sum(is.na(secondary_comp_events_surv$event_date)))
+```
+
+### Custom Composite Definition 
+
+This also creates tibbles for custom composites (beyond the primary/secondary defined by HCMR).
+
+```{r}
+#HF-related composite
+hf_comp_events <- hcmr_adj %>%
+  left_join(lvad_placement_events, by='sitePatID') %>%
+  filter(criteriamet ==1) %>% #Only filter for those which meet the adjudicated criteria
+  select(-criteriamet) %>%
+  filter(
+        (death_cause == 1 & deathCardio == 3)| # Cardiac death (HF-related specifically)
+        transplant ==1 | #Heart transplant
+        fulvad == 1 | #LVAD placement
+        hf==1 #Heart failure hospitlisation
+         )
+
+hf_comp_events_surv <- hf_comp_events %>%
+  transmute(
+    sitePatID,
+    event = case_when(
+      death_cause == 1 & deathCardio == 3 ~ "hf_death",
+      transplant == 1 ~ "transplant",
+      fulvad == 1 ~ "lvad",
+      hf == 1 ~ "hf_hospitalisation",
+      TRUE ~ NA_character_
+    ),
+    event_date = case_when(
+      death_cause == 1 & deathCardio == 3 ~ eventDate,
+      transplant == 1 ~ eventDate,
+      fulvad == 1 ~ fulvaddt,
+      hf == 1 ~ eventDate,
+      TRUE ~ as_date(NA_character_)
+    )
+  ) %>%
+  filter(!is.na(event), !is.na(event_date))
+
+rm(hf_comp_events)
+```
+
+```{r}
+#VA-related composite
+va_comp_events <- hcmr_adj %>%
+  filter(criteriamet ==1) %>% #Only filter for those which meet the adjudicated criteria
+  select(-criteriamet) %>%
+  filter(
+        (death_cause == 1 & deathCardio == 1)| # Cardiac death (sudden arrhythmic)
+        (death_cause == 1 & deathCardio == 2)| # Cardiac death (non-sudden arrhythmic)
+        vtach ==1 #Ventricular tachyarrhythmia event e.g. aborted SCD or VT
+         )
+
+va_comp_events_surv <- va_comp_events %>%
+  transmute(
+    sitePatID,
+    event = case_when(
+      death_cause == 1 & deathCardio == 1 ~ "va_death",
+      death_cause == 1 & deathCardio == 2 ~ "va_death",
+      vtach == 1 ~ "vtach",
+      TRUE ~ NA_character_
+    ),
+    event_date = case_when(
+      death_cause == 1 & deathCardio == 1 ~ eventDate,
+      death_cause == 1 & deathCardio == 2 ~ eventDate,
+      vtach == 1 ~ eventDate,
+      TRUE ~ as_date(NA_character_)
+    )
+  ) %>%
+  filter(!is.na(event), !is.na(event_date))
+
+rm(va_comp_events)
+```
+
+```{r}
+#AF events
+af_events <- hcmr_adj %>%
+  filter(criteriamet ==1) %>% #Only filter for those which meet the adjudicated criteria
+  select(-criteriamet) %>%
+  filter(
+        afib ==1 #Atrial fibrillation
+         )
+
+af_events_surv <- af_events %>%
+  transmute(
+    sitePatID,
+    event = case_when(
+      afib == 1 ~ "atrial_fibrillation",
+      TRUE ~ NA_character_
+    ),
+    event_date = case_when(
+      afib == 1 ~ eventDate,
+      TRUE ~ as_date(NA_character_)
+    )
+  ) %>%
+  filter(!is.na(event), !is.na(event_date))
+
+rm(af_events)
+```
+
+```{r}
+#Stroke-related composite
+stroke_comp_events <- hcmr_adj %>%
+  filter(criteriamet ==1) %>% #Only filter for those which meet the adjudicated criteria
+  select(-criteriamet) %>%
+  filter(
+        (death_cause == 1 & deathCardio == 8)| # Cardiac death (stroke-related)
+        (death == 0 & stroke == 1) #Non-fatal stroke
+         )
+
+stroke_comp_events_surv <- stroke_comp_events %>%
+  transmute(
+    sitePatID,
+    event = case_when(
+      death_cause == 1 & deathCardio == 8 ~ "fatal_stroke",
+      (death == 0 & stroke == 1) ~ "nonfatal_stroke",
+      TRUE ~ NA_character_
+    ),
+    event_date = case_when(
+      death_cause == 1 & deathCardio == 8 ~ eventDate,
+      (death == 0 & stroke == 1) ~ eventDate,
+      TRUE ~ as_date(NA_character_)
+    )
+  ) %>%
+  filter(!is.na(event), !is.na(event_date))
+
+rm(stroke_comp_events)
+```
+
+### Censoring of Individuals with Unknown Death Cause
+
+This includes the individuals who died of unknown causes as censored individuals.
+
+```{r}
+unknown_death <- filter(hcmr_adj, death_cause==3) %>%
+  select(sitePatID, eventDate) %>%
+  mutate(event = 'unknown_death',
+         event_date = eventDate) %>%
+  select(-eventDate)
+```
+
+## Final Dataset Construction
+
+This then merges the total_df_notransform with the primary and secondary outcome tibbles to create two final datasets for survival analysis and then for each computes 
+
+1) indicator for the event or censoring 
+2) event/censoring date 
+3) time to event/censoring in days and 
+4) age at event/censoring in years
+
+```{r}
+make_outcome_df <- function(total_df_notransform, comp_events_surv, unknown_death, output_basename) {
+
+  output_df <- total_df_notransform %>%
+    left_join(comp_events_surv, by = "sitePatID") %>%
+    left_join(unknown_death, by = "sitePatID", suffix = c("", "_unknowndeath")) %>%
+    mutate(
+      event_indicator = ifelse(!is.na(event), 1, 0), # event refers to the composite events in comp_events_surv
+      event_or_censoring_date = case_when( #This shows the ranking for how this date is computed with priority of event_date > unknown_death_date > eosdt > last_fudt > icfDate
+        event_indicator == 1 ~ event_date,
+        event_unknowndeath == "unknown_death" ~ event_date_unknowndeath, # unknown death treated as censored
+        eosyn == 0 & !is.na(eosdt) ~ eosdt, # discontinued from study
+        !is.na(last_fudt) ~ last_fudt, # last follow-up date for the patient as per the FUP dataset long version
+        T ~ icfDate      #If no event and no eosdt and no fudt, then assume the patient was censored at icfdate
+        ),
+      time_to_event_or_censoring_years =
+        as.numeric(difftime(event_or_censoring_date, icfDate, units = "days")) / 365.25,
+      age_at_event_or_censoring = age + time_to_event_or_censoring_years
+    ) %>%
+    # Ensure one row per person by taking the earliest event/censoring date
+    group_by(sitePatID) %>%
+    slice_min(order_by = event_or_censoring_date, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    select(-event_unknowndeath, -event_date_unknowndeath)
+  
+  #Output error if there is any individual with NA event_or_censoring_date
+  if(nrow(filter(output_df, is.na(event_or_censoring_date))) >0){
+    print('NA value in the event_or_censoring date for some individual in this dataset')
+  }
+
+  composite <- str_match(output_basename, '_([A-Za-z]+_outcome_df)')[,2]
+  print(str_glue("Number of individuals with {composite} composite events: {sum(output_df$event_indicator)}"))
+
+    #This saves the primary and secondary outcome datasets for survival analysis as .rds files
+  saveRDS(output_df, str_glue('{output_basename}_{nrow(output_df)}.rds'))
+
+  return(output_df)
+}
+```
+
+```{r}
+#Make the outcome_dfs
+composites <- c('primary','secondary','hf','va','af','stroke')
+
+outcome_dfs <- map2(composites, list(primary_comp_events_surv, secondary_comp_events_surv, hf_comp_events_surv, va_comp_events_surv, af_events_surv, stroke_comp_events_surv), ~make_outcome_df(
+  total_df_notransform, 
+  comp_events_surv = .y,
+  unknown_death = unknown_death,
+  output_basename = str_glue('genetic_subset_analysis/common/output/data/hcmr_{.x}_outcome_df')
+))
+
+names(outcome_dfs) <- composites
+
+rm(list=ls(pattern='surv'))
+```
+
+```{r}
+#Follow-up times are computed as the time from baseline to the event date or the censoring date (whichever comes first) and then converted to years. The median, Q1, Q3, mean and SD of follow-up times are then printed.
+#I repeat this for both primary and secondary composites.
+
+fup_times <- map(outcome_dfs[1:2], ~mutate(.x, fup_time_years = as.numeric(difftime(event_or_censoring_date, icfDate, units = "days")) / 365.25))  #Primary and secondary composites only
+fup_quartiles <- map(fup_times, ~quantile(.x$fup_time_years, probs = c(0.25, 0.5, 0.75), na.rm = TRUE))
+
+print(fup_quartiles)
+
+mean_fup_times <- map(fup_times, ~mean(.x$fup_time_years))
+sd_fup_times <- map(fup_times, ~sd(.x$fup_time_years))
+
+walk2(mean_fup_times,sd_fup_times, ~print(str_glue('Follow-up time (years) mean and SD: {.x} ± {.y}')))
+
+rm(fup_times, fup_quartiles)
+```
+
+```{r}
+kable_prep <- function(input_df){
+
+  output_df <- input_df %>%
+    group_by(event) %>%
+    summarise(count = n()) %>%
+    arrange(desc(count))
+
+  return(output_df)
+}
+```
+
+```{r}
+#Output a HTML table of the breakdown of composite events 
+
+kable(kable_prep(outcome_dfs[[1]]), caption = "Breakdown of Primary Composite Events") %>%
+  kable_styling(full_width = F)
+```
+
+```{r}
+kable(kable_prep(outcome_dfs[[2]]), caption = "Breakdown of Secondary Composite Events") %>%
+  kable_styling(full_width = F)
+```
+
+```{r}
+kable(kable_prep(outcome_dfs[[3]]), caption = "Breakdown of HF Composite Events") %>%
+  kable_styling(full_width = F)
+```
+
+```{r}
+kable(kable_prep(outcome_dfs[[4]]), caption = "Breakdown of VA Composite Events") %>%
+  kable_styling(full_width = F)
+```
+
+```{r}
+kable(kable_prep(outcome_dfs[[5]]), caption = "Breakdown of AF Events") %>%
+  kable_styling(full_width = F)
+```
+
+```{r}
+kable(kable_prep(outcome_dfs[[6]]), caption = "Breakdown of Stroke Composite Events") %>%
+  kable_styling(full_width = F)
+```

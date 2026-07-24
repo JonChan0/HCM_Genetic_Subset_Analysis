@@ -1,0 +1,481 @@
+---
+title: "Comparison of HCMR Case Rare-Variant Carriers on Adverse Clinical OUtcomes "
+author: "Jonathan Chan"
+date: "2026-01-23"
+output: 
+  html_document:
+    code_folding: hide   
+---
+
+This performs pairwise comparisons of adverse clinical outcomes among HCMR cases with rare-variants with subgrouping by different approaches.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(viridis)
+library(tictoc)
+library(kableExtra)
+library(readxl)
+library(ggrepel)
+
+rm(list=ls())
+
+theme_set(theme_classic(base_size=14))
+source('genetic_subset_analysis/common/hcmr_outcomes_functions.R')
+```
+
+# Import
+
+This imports in the HCMR data after preprocessing.
+
+```{r}
+primary_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_primary_outcome_df_915.rds') #Uses the 915 sarcomere positive dataset (w/o filtering for common genetics)
+secondary_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_secondary_outcome_df_915.rds')
+
+hf_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_hf_outcome_df_915.rds')
+af_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_af_outcome_df_915.rds')
+va_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_va_outcome_df_915.rds')
+
+#Add in the rare variant class as P_LP or VUS or sarcomere-negative
+hcmr_rarevar_class <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class_plp_vusfpvus.tsv') %>%
+    select(HCR_IDs=HCR_ID, rarevar_class=class) %>%
+    mutate(sarcomere_binned = case_when(
+      str_detect(rarevar_class,'_P_LP$') ~ 'P_LP', #So multiple variant individuals are assigned to P_LP if they have one
+      str_detect(rarevar_class, 'VUS_FP_VUS') ~ 'VUS',
+      TRUE ~ 'Sarcomere-negative'
+    ))
+
+covars <- c('sex','bmi')
+outcome_vars <- c('hcmdt','event','event_date','event_indicator','event_or_censoring_date','time_to_event_or_censoring_years','age_at_event_or_censoring')
+```
+
+```{r}
+#Merge into single sarcpos tibble
+sarcpos <- map(list(primary_outcomes_df, secondary_outcomes_df, hf_outcomes_df, af_outcomes_df, va_outcomes_df), ~ data_preprocessor(., c(covars, outcome_vars), sarcomere_status=T,hcmr_rarevar_class=hcmr_rarevar_class))
+
+rm(primary_outcomes_df, secondary_outcomes_df, hf_outcomes_df, af_outcomes_df, va_outcomes_df, hcmr_rarevar_class)
+
+#Check for unique values of sarcomere_binned
+map(sarcpos, ~ unique(.x$sarcomere_binned))
+```
+
+# Comparison Tibble Generation
+
+This builds the comparison tibbles for each of the comparisons in the rare variant subset analysis.
+```{r}
+pergene_rarevar_classification <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class.tsv')
+pergene_perpatho_rarevar_classification <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class_plp_vusfpvus.tsv')
+
+#Build the phenotype tibble, combining the two rare variant classifications into the same tibble
+sarcpos <- map(sarcpos, function(x) x %>%
+  left_join(select(pergene_rarevar_classification,HCR_ID, class_primary=class), by=c('HCR_IDs'='HCR_ID')) %>%
+  left_join(select(pergene_perpatho_rarevar_classification,HCR_ID, class_secondary=class), by=c('HCR_IDs'='HCR_ID'))
+)
+```
+
+```{r}
+#This generates the comparison groups for the analyses by collating all the variant classes in each comparison group
+
+#For primary classification comparisons
+#For thick vs. thin (excluding ACTC1 from Thin btw)
+thick_class <- unique(sarcpos[[1]]$class_primary)[!str_detect(unique(sarcpos[[1]]$class_primary),'ACTC1|TPM1|TNNI3|TNNT2') & str_detect(unique(sarcpos[[1]]$class_primary),'MYBPC3|MYH7|MYL2|MYL3')]
+thin_class <- unique(sarcpos[[1]]$class_primary)[str_detect(unique(sarcpos[[1]]$class_primary),'TPM1|TNNI3|TNNT2') & !str_detect(unique(sarcpos[[1]]$class_primary),'ACTC1|MYBPC3|MYH7|MYL2|MYL3')]
+
+#For mybpc3_pLOF vs. mybpc3_nonlof
+mybpc3_plof_class <- unique(sarcpos[[1]]$class_primary)[str_detect(unique(sarcpos[[1]]$class_primary),'MYBPC3_pLOF') & !str_detect(unique(sarcpos[[1]]$class_primary),'MYBPC3_nonLOF')]
+mybpc3_nonlof_class <- unique(sarcpos[[1]]$class_primary)[str_detect(unique(sarcpos[[1]]$class_primary),'MYBPC3_nonLOF') & !str_detect(unique(sarcpos[[1]]$class_primary),'MYBPC3_pLOF')]
+
+#For mybpc3 vs. MYH7
+mybpc3_class <- unique(sarcpos[[1]]$class_primary)[str_detect(unique(sarcpos[[1]]$class_primary),'MYBPC3') & !str_detect(unique(sarcpos[[1]]$class_primary),'MYH7')]
+myh7_class <- unique(sarcpos[[1]]$class_primary)[str_detect(unique(sarcpos[[1]]$class_primary),'MYH7') & !str_detect(unique(sarcpos[[1]]$class_primary),'MYBPC3')]
+
+#For secondary classification comparison
+#For P/LP vs. VUS_VUS_FP
+p_lp_class <- unique(sarcpos[[1]]$class_secondary)[str_detect(unique(sarcpos[[1]]$class_secondary),'P_LP') & !str_detect(unique(sarcpos[[1]]$class_secondary), 'VUS')] #I use this because I wish to exclude all the individuals who have a combination across P_LP and VUS_VUS_FP
+vus_vusfp_class <- unique(sarcpos[[1]]$class_secondary)[str_detect(unique(sarcpos[[1]]$class_secondary),'VUS') & !str_detect(unique(sarcpos[[1]]$class_secondary), 'P_LP')] 
+
+#---------------------------------------------------------------------------------------
+#Parameter lists for each comparison
+thick_thin_param_list <- list(thick_class, 'Thick',thin_class, 'Thin')
+mybpc3_plof_nonlof_param_list <- list(mybpc3_plof_class, 'MYBPC3_pLOF', mybpc3_nonlof_class, 'MYBPC3_nonLOF')
+mybpc3_myh7_param_list <- list(mybpc3_class, 'MYBPC3',myh7_class,'MYH7')
+p_lp_vus_vusfp_param_list <- list(p_lp_class, 'P/LP', vus_vusfp_class, 'VUS')
+
+rm(list=ls(pattern='class$'))
+```
+
+This now generates the actual tibble to run the comparison on, generating one tibble per comparison.
+
+```{r comparison_tb}
+#This function generates each tibble for each comparison
+comparison_pheno_tb_gen <- function(phenotype_tb,param_list,rarevar_class_tb, var_class='primary', only_singles=T){
+  #This defines the comparison groups based on the param_list input e.g. for thick vs. thin, G1 = Thick, G2 = Thin
+  group1_classes <- param_list[[1]]
+  group1_name <- param_list[[2]]
+  group2_classes<- param_list[[3]]
+  group2_name<- param_list[[4]]
+  
+  if(var_class=='primary'){ # When using primary classification based on gene-based
+    
+    output_tb <- phenotype_tb %>% 
+      mutate(group=case_when(class_primary %in% group1_classes ~ group1_name,
+                           class_primary %in% group2_classes ~ group2_name,
+                           T~NA))
+  }
+  else if (var_class == 'secondary'){ # When using secondary classification based on pathogenicity
+    
+    output_tb <- phenotype_tb %>%
+      mutate(group=case_when(class_secondary %in% group1_classes ~ group1_name,
+                             class_secondary %in% group2_classes ~ group2_name,
+                             T~NA))
+                              
+  }
+
+  output_tb <- mutate(output_tb, group=factor(group, levels=c(group2_name, group1_name))) %>%
+    filter(!is.na(group)) #Filter to only individuals in either group
+  
+  #This filters down to single dosage individuals, 
+   if (isTRUE(only_singles)){
+     if(var_class=='primary')
+    
+    single_dosage_individuals <- rarevar_class_tb %>%
+      mutate(total_dosage = select(.,MYBPC3_pLOF:FHOD3) %>% rowSums(na.rm=T))%>%
+      filter(total_dosage==1)
+
+     else if (var_class == 'secondary'){
+      
+      single_dosage_individuals <- rarevar_class_tb %>%
+        mutate(total_dosage = select(.,MYBPC3_P_LP:FHOD3_VUS_FP_VUS) %>% rowSums(na.rm=T)) %>%
+        filter(total_dosage==1)
+       
+     }
+     output_tb <- filter(output_tb, HCR_IDs %in% single_dosage_individuals$HCR_ID)
+
+  } 
+  return(output_tb)
+}
+```
+
+These generate the comparison_tbs for each comparison - either transformed or non-transformed and all for single-dosage individuals.
+
+```{r}
+#These are for the primary composite
+temp <- map(list(thick_thin_param_list,mybpc3_plof_nonlof_param_list,mybpc3_myh7_param_list),~comparison_pheno_tb_gen(phenotype_tb = sarcpos[[1]], param_list=.,rarevar_class_tb = pergene_rarevar_classification, var_class='primary'))
+names(temp) <- c('thick_thin_tb','mybpc3_plof_nonlof_tb','mybc3_myh7_tb')
+
+temp2 <- map(list(p_lp_vus_vusfp_param_list),~comparison_pheno_tb_gen(phenotype_tb = sarcpos[[1]], param_list=.,rarevar_class_tb = pergene_perpatho_rarevar_classification, var_class='secondary'))
+names(temp2) <- c('p_lp_vus_vusfp_tb')
+
+comparison_tbs_primarycomposite <- c(temp, temp2)
+rm(temp, temp2)
+
+
+#These are for the secondary composite
+temp <- map(list(thick_thin_param_list,mybpc3_plof_nonlof_param_list,mybpc3_myh7_param_list),~comparison_pheno_tb_gen(phenotype_tb = sarcpos[[2]], param_list=.,rarevar_class_tb = pergene_rarevar_classification, var_class='primary'))
+names(temp) <- c('thick_thin_tb','mybpc3_plof_nonlof_tb','mybc3_myh7_tb')
+
+temp2<- map(list(p_lp_vus_vusfp_param_list),~comparison_pheno_tb_gen(phenotype_tb = sarcpos[[2]], param_list=.,rarevar_class_tb = pergene_perpatho_rarevar_classification, var_class='secondary'))
+names(temp2) <- c('p_lp_vus_vusfp_tb')
+
+comparison_tbs_secondarycomposite <- c(temp, temp2)
+rm(temp, temp2)
+```
+
+This repeats for the focused clinical composites.
+
+```{r}
+#Repeat for the HF composite
+temp <- map(list(thick_thin_param_list,mybpc3_plof_nonlof_param_list,mybpc3_myh7_param_list),~comparison_pheno_tb_gen(phenotype_tb = sarcpos[[3]], param_list=.,rarevar_class_tb = pergene_rarevar_classification, var_class='primary'))
+names(temp) <- c('thick_thin_tb','mybpc3_plof_nonlof_tb','mybc3_myh7_tb')
+
+temp2<- map(list(p_lp_vus_vusfp_param_list),~comparison_pheno_tb_gen(phenotype_tb = sarcpos[[3]], param_list=.,rarevar_class_tb = pergene_perpatho_rarevar_classification, var_class='secondary'))
+names(temp2) <- c('p_lp_vus_vusfp_tb')
+
+comparison_tbs_hfcomposite <- c(temp, temp2)
+
+#Repeat for the AF composite
+temp <- map(list(thick_thin_param_list,mybpc3_plof_nonlof_param_list,mybpc3_myh7_param_list),~comparison_pheno_tb_gen(phenotype_tb = sarcpos[[4]], param_list=.,rarevar_class_tb = pergene_rarevar_classification, var_class='primary'))
+names(temp) <- c('thick_thin_tb','mybpc3_plof_nonlof_tb','mybc3_myh7_tb')
+
+temp2<- map(list(p_lp_vus_vusfp_param_list),~comparison_pheno_tb_gen(phenotype_tb = sarcpos[[4]], param_list=.,rarevar_class_tb = pergene_perpatho_rarevar_classification, var_class='secondary'))
+names(temp2) <- c('p_lp_vus_vusfp_tb')
+
+comparison_tbs_afcomposite <- c(temp, temp2)
+
+#Repeat for the VA composite
+
+temp <- map(list(thick_thin_param_list,mybpc3_plof_nonlof_param_list,mybpc3_myh7_param_list),~comparison_pheno_tb_gen(phenotype_tb = sarcpos[[5]], param_list=.,rarevar_class_tb = pergene_rarevar_classification, var_class='primary'))
+names(temp) <- c('thick_thin_tb','mybpc3_plof_nonlof_tb','mybc3_myh7_tb')
+
+temp2<- map(list(p_lp_vus_vusfp_param_list),~comparison_pheno_tb_gen(phenotype_tb = sarcpos[[5]], param_list=.,rarevar_class_tb = pergene_perpatho_rarevar_classification, var_class='secondary'))
+names(temp2) <- c('p_lp_vus_vusfp_tb')
+
+comparison_tbs_vacomposite <- c(temp, temp2)
+
+rm(thick_thin_param_list,mybpc3_myh7_param_list,mybpc3_plof_nonlof_param_list, p_lp_vus_vusfp_param_list)
+```
+```{r}
+#This provides a series of str_glue statements which outline the number of each group in each of the comparison_tbs_primarycomposite for use in the flowchart diagram.
+
+walk(comparison_tbs_primarycomposite, ~ {
+  n_group1 <- nrow(filter(.x, group == levels(.x$group)[2]))
+  n_group2 <- nrow(filter(.x, group == levels(.x$group)[1]))
+  print(str_glue("Comparison: {unique(.x$group)} -- N Group 1 ({levels(.x$group)[2]}): {n_group1}, N Group 2 ({levels(.x$group)[1]}): {n_group2}"))
+})
+```
+
+# Cox Regression
+
+This performs Cox regression to compare the adverse clinical outcomes between each pairwise comparison using the comparison tibbles generated above.
+
+```{r}
+primary_composite_cox_results <- map2(comparison_tbs_primarycomposite, c('thick_thin','mybpc3_plof_nonlof','mybc3_myh7', 'p_lp_vus_vusfp'),~cox_function(.x, 
+             predictor_name='group',
+             predictor_type='categorical',
+             covars=covars, #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             entry_time_varname='age', #Left-truncation at baseline age (delayed entry)
+             output_dir='genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/primary_composite/',suffix=.y)) %>% bind_rows()
+
+secondary_composite_cox_results <- map2(comparison_tbs_secondarycomposite, c('thick_thin','mybpc3_plof_nonlof','mybc3_myh7', 'p_lp_vus_vusfp'),~cox_function(.x, 
+             predictor_name='group',
+             predictor_type='categorical',
+             covars=covars, #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             entry_time_varname='age', #Left-truncation at baseline age (delayed entry)
+             output_dir='genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/secondary_composite/',suffix=.y)) %>% bind_rows()
+
+#Plot the forest plot for sarcomere status with both sarcomere and sarcomere_binned
+sarcomere_cox_plot_tb <- bind_rows(
+    primary_composite_cox_results %>% mutate(composite='Primary'), 
+    secondary_composite_cox_results %>% mutate(composite='Secondary')
+) %>%
+  filter(!str_detect(term, 'sex|bmi')) %>%
+  mutate(term = case_when(
+    term == 'groupThick' ~ 'Thick\nvs.\nThin',
+    term == 'groupMYBPC3_pLOF' ~ 'MYBPC3_pLOF\nvs.\nMYBPC3_nonLOF',
+    term == 'groupMYBPC3' ~ 'MYBPC3\nvs.\nMYH7',
+    term == 'groupP/LP' ~ 'Sarcomere-P/LP\nvs.\nSarcomere-VUS',
+  )) %>%
+    mutate(term = factor(term, levels=c('Thick\nvs.\nThin','MYBPC3\nvs.\nMYH7','MYBPC3_pLOF\nvs.\nMYBPC3_nonLOF','Sarcomere-P/LP\nvs.\nSarcomere-VUS'),ordered=T)) %>%
+    mutate(Group = term) %>%
+    select(term,n_events, composite, hr, hr_low, hr_high, p.value, Group) %>%
+    mutate(adj_pvalue = p.adjust(p.value, method='fdr')) %>%
+    mutate(across(c(hr, hr_low, hr_high, p.value, adj_pvalue), ~ signif(., digits=3)))
+
+#Plot the forest plot
+forest_plot_cox(
+  sarcomere_cox_plot_tb,
+  output_dir = 'genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/',
+  suffix='_rarevar_subset_analysis', group_palette='Dark2'
+)
+
+write_rds(sarcomere_cox_plot_tb, 'genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/hcmr_rarevar_subset_cox_age_timescale.rds')
+write_tsv(sarcomere_cox_plot_tb, 'genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/hcmr_rarevar_subset_cox_age_timescale.tsv')
+
+rm(sarcomere_cox_plot_tb, primary_composite_cox_results, secondary_composite_cox_results)
+```
+
+Also run for some more specific composites e.g HF or AF specific as per Ho et al, 2018 but only for the MYBPC3 vs. MYH7 comparison.
+
+```{r}
+hf_composite_cox_results <- map2(comparison_tbs_hfcomposite, c('thick_thin','mybpc3_plof_nonlof','mybc3_myh7', 'p_lp_vus_vusfp'),~cox_function(.x, 
+             predictor_name='group',
+             predictor_type='categorical',
+             covars=covars, #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             entry_time_varname='age', #Left-truncation at baseline age (delayed entry)
+             output_dir='genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/hf_composite/',suffix=.y)) %>% bind_rows()
+
+af_composite_cox_results <- map2(comparison_tbs_afcomposite, c('thick_thin','mybpc3_plof_nonlof','mybc3_myh7', 'p_lp_vus_vusfp'),~cox_function(.x, 
+             predictor_name='group',
+             predictor_type='categorical',
+             covars=covars, #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             entry_time_varname='age', #Left-truncation at baseline age (delayed entry)
+             output_dir='genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/af_composite/',suffix=.y)) %>% bind_rows()
+
+va_composite_cox_results <- map2(comparison_tbs_vacomposite, c('thick_thin','mybpc3_plof_nonlof','mybc3_myh7', 'p_lp_vus_vusfp'),~cox_function(.x, 
+             predictor_name='group',
+             predictor_type='categorical',
+             covars=covars, #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             entry_time_varname='age', #Left-truncation at baseline age (delayed entry)
+             output_dir='genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/va_composite/',suffix=.y)) %>% bind_rows()
+
+#Plot these together as a forest plot
+hf_af_va_cox_plot_tb <- bind_rows(
+    hf_composite_cox_results %>% mutate(composite='HF'), 
+    af_composite_cox_results %>% mutate(composite='AF'),
+    va_composite_cox_results %>% mutate(composite='VA')
+) %>%
+  filter(!str_detect(term, 'sex|bmi')) %>%
+  mutate(term = case_when(
+    term == 'groupThick' ~ 'Thick\nvs.\nThin',
+    term == 'groupMYBPC3_pLOF' ~ 'MYBPC3_pLOF\nvs.\nMYBPC3_nonLOF',
+    term == 'groupMYBPC3' ~ 'MYBPC3\nvs.\nMYH7',
+    term == 'groupP/LP' ~ 'Sarcomere-P/LP\nvs.\nSarcomere-VUS',
+  )) %>%
+    mutate(term = factor(term, levels=c('Thick\nvs.\nThin','MYBPC3\nvs.\nMYH7','MYBPC3_pLOF\nvs.\nMYBPC3_nonLOF','Sarcomere-P/LP\nvs.\nSarcomere-VUS'),ordered=T)) %>%
+    mutate(Group = term) %>%
+    filter(term == 'MYBPC3\nvs.\nMYH7') %>% #Filter to just the MYBPC3 vs. MYH7 comparison
+    select(term,n_events, composite, hr, hr_low, hr_high, p.value, Group) %>%
+    mutate(adj_pvalue = p.adjust(p.value, method='fdr'))%>%
+    mutate(across(c(hr, hr_low, hr_high, p.value, adj_pvalue), ~ signif(., digits=3)))
+
+#Plot the forest plot
+forest_plot_cox(
+  hf_af_va_cox_plot_tb,
+  output_dir = 'genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/',
+  suffix='_hf_af_va_composite', group_palette='Set3'
+)
+
+write_rds(hf_af_va_cox_plot_tb, 'genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/hcmr_rarevar_subset_cox_age_timescale_hf_af_va_composite.rds')
+write_tsv(hf_af_va_cox_plot_tb, 'genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/hcmr_rarevar_subset_cox_age_timescale_hf_af_va_composite.tsv')
+```
+
+# Kaplan Meier Analysis
+
+```{r}
+#Plot for PRS categorical groups for both composite outcomes and for age timescale
+
+#For primary composite
+walk2(comparison_tbs_primarycomposite, c('thick_thin','mybpc3_plof_nonlof','mybc3_myh7', 'p_lp_vus_vusfp'), ~km_survival_curv_plotter(.x,'group','event_indicator', 'age_at_event_or_censoring', 'genetic_subset_analysis/RareVar/3_output/plots/2_Severity/2_KaplanMeier/1_AgeAsTimescale/primary_composite/', entry_time_varname='age', output_suffix=.y, ylimits=list(c(40,100),c(0.0,0.4),c(0.0,0.4))) 
+)
+
+#For secondary composite
+walk2(comparison_tbs_secondarycomposite, c('thick_thin','mybpc3_plof_nonlof','mybc3_myh7', 'p_lp_vus_vusfp'), ~km_survival_curv_plotter(.x,'group','event_indicator', 'age_at_event_or_censoring', 'genetic_subset_analysis/RareVar/3_output/plots/2_Severity/2_KaplanMeier/1_AgeAsTimescale/secondary_composite/', entry_time_varname='age', output_suffix=.y, ylimits=list(c(40,100),c(0.0,0.4),c(0.0,0.4))) 
+)
+```
+
+# Cox Assumptions Check
+
+```{r}
+#This runs the assumptions check on the models
+
+primary_composite_cox_models <- map2(comparison_tbs_primarycomposite, c('thick_thin','mybpc3_plof_nonlof','mybc3_myh7', 'p_lp_vus_vusfp'),~cox_function(.x, 
+             predictor_name='group',
+             predictor_type='categorical',
+             covars=covars, #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             entry_time_varname='age', #Left-truncation at baseline age (delayed entry)
+             output_dir='genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/primary_composite/',suffix=.y, return_model=T)) 
+
+secondary_composite_cox_models <- map2(comparison_tbs_secondarycomposite, c('thick_thin','mybpc3_plof_nonlof','mybc3_myh7', 'p_lp_vus_vusfp'),~cox_function(.x, 
+             predictor_name='group',
+             predictor_type='categorical',
+             covars=covars, #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             entry_time_varname='age', #Left-truncation at baseline age (delayed entry)
+             output_dir='genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/secondary_composite/',suffix=.y, return_model=T))
+
+#Run the assumptions check
+#Primary composite
+primary_composite_cox_zph <- map2(primary_composite_cox_models,c('thick_thin','mybpc3_plof_nonlof','mybc3_myh7', 'p_lp_vus_vusfp'), ~ cox_diagnostics(.x, str_c('genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/primary_composite/',.y)) %>% mutate(comparison=.y)) %>% bind_rows() %>% filter(term != 'GLOBAL') %>% mutate(adj_p = p.adjust(p.value, method='fdr'))
+
+#Secondary composite
+secondary_composite_cox_zph <- map2(secondary_composite_cox_models,c('thick_thin','mybpc3_plof_nonlof','mybc3_myh7', 'p_lp_vus_vusfp'), ~ cox_diagnostics(.x, str_c('genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/secondary_composite/',.y)) %>% mutate(comparison=.y)) %>% bind_rows() %>% filter(term != 'GLOBAL') %>% mutate(adj_p = p.adjust(p.value, method='fdr'))
+
+```
+
+# Single vs. Multi Variant Carrier Analysis
+
+```{r}
+all_merged_overlapvars_tb <- read_tsv('genetic_subset_analysis/RareVar/3_output/individual_class/overlap_variants/hcmr_KT_overlapvariants.tsv') %>%
+  filter(HCR_ID %in% sarcpos[[1]]$HCR_IDs) #Filter only to the 915 sarcomere-positive individuals
+
+#Identify the number of homozygotes and the number of multiple heterozygotes
+homozygotes <- all_merged_overlapvars_tb %>% 
+  filter(dosage1==2 | dosage2==2) #There are 2 homozygotes 
+multi_het <- all_merged_overlapvars_tb %>%
+  filter(!is.na(dosage2))
+
+print(str_c('There are', nrow(homozygotes), 'homozygotes and',length(unique(multi_het$HCR_ID)),'multiple heterozygotes with ', length(intersect(homozygotes$HCR_ID, multi_het$HCR_ID)),'individual being both so technically',nrow(homozygotes)+length(unique(multi_het$HCR_ID))-length(intersect(homozygotes$HCR_ID, multi_het$HCR_ID)), 'individuals with >1 dose of a rare variant', sep=' '))
+
+#These are all the individuals with >1 dosage of rare variant
+multi_dosage_ids <- unique(c(homozygotes$HCR_ID,multi_het$HCR_ID))
+```
+
+```{r}
+#Generate the phenotype tb for comparison for both primary and secondary composites
+multi_vs_single_tb <- map(sarcpos, function(x) x %>%
+  mutate(group = ifelse(HCR_IDs %in% multi_dosage_ids, 'Multi','Single')) %>%
+  mutate(group=factor(group, levels=c('Single','Multi'))) 
+)
+
+primary_composite_cox_results_multi <- cox_function(multi_vs_single_tb[[1]], 
+             predictor_name='group',
+             predictor_type='categorical',
+             covars=covars, #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             entry_time_varname='age', #Left-truncation at baseline age (delayed entry)
+             output_dir='genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/primary_composite/multi/',suffix='_multi')
+
+secondary_composite_cox_results_multi <- cox_function(multi_vs_single_tb[[2]], 
+             predictor_name='group',
+             predictor_type='categorical',
+             covars=covars, #No age because it is used as timescale
+             indicator_varname ='event_indicator',
+             time_varname='age_at_event_or_censoring',
+             entry_time_varname='age', #Left-truncation at baseline age (delayed entry)
+             output_dir='genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/secondary_composite/multi/',suffix='_multi')
+
+#Plot the forest plot for sarcomere status with both sarcomere and sarcomere_binned
+sarcomere_cox_plot_tb_multi_vs_single <- bind_rows(
+    primary_composite_cox_results_multi %>% mutate(composite='Primary'), 
+    secondary_composite_cox_results_multi %>% mutate(composite='Secondary')
+) %>%
+  filter(!str_detect(term, 'sex|bmi')) %>%
+  mutate(term = case_when(
+    term == 'groupMulti' ~ 'Multi\nvs.\nSingle',
+  )) %>%
+    mutate(Group = term) %>%
+    select(term,n_events, composite, hr, hr_low, hr_high, p.value, Group) %>%
+    mutate(adj_pvalue = p.adjust(p.value, method='fdr'))%>%
+    mutate(across(c(hr, hr_low, hr_high, p.value, adj_pvalue), ~ signif(., digits=3)))
+
+#Plot the forest plot
+forest_plot_cox(
+  sarcomere_cox_plot_tb_multi_vs_single,
+  output_dir = 'genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/',
+  suffix='_rarevar_subset_analysis_multi', group_palette='Accent'
+)
+
+write_rds(sarcomere_cox_plot_tb_multi_vs_single, 'genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/hcmr_rarevar_subset_cox_age_timescale_multi.rds')
+write_tsv(sarcomere_cox_plot_tb_multi_vs_single, 'genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/hcmr_rarevar_subset_cox_age_timescale_multi.tsv')
+
+rm(sarcomere_cox_plot_tb_multi_vs_single, primary_composite_cox_results_multi, secondary_composite_cox_results_multi)
+```
+
+This generates the Kaplan-Meier plots for the single vs. multi-variant carrier analysis.
+
+```{r}
+#Plot for PRS categorical groups for both composite outcomes and for age timescale
+
+#For primary composite
+km_survival_curv_plotter(multi_vs_single_tb[[1]],'group','event_indicator', 'age_at_event_or_censoring', 'genetic_subset_analysis/RareVar/3_output/plots/2_Severity/2_KaplanMeier/1_AgeAsTimescale/primary_composite/', entry_time_varname='age', output_suffix='_multi', ylimits=list(c(40,100),c(0.0,0.4),c(0.0,0.4)))
+
+km_survival_curv_plotter(multi_vs_single_tb[[2]],'group','event_indicator', 'age_at_event_or_censoring', 'genetic_subset_analysis/RareVar/3_output/plots/2_Severity/2_KaplanMeier/1_AgeAsTimescale/secondary_composite/', entry_time_varname='age', output_suffix='_multi', ylimits=list(c(40,100),c(0.0,0.4),c(0.0,0.4)))
+
+```
+
+## Summary Counts Output
+
+This outputs for each comparison, the number of individuals per group.
+
+
+```{r}
+summary_counts_tb <- map_dfr(comparison_tbs_primarycomposite, ~.x %>%
+  group_by(group) %>%
+  summarise(n=n()) %>%
+  pivot_wider(names_from=group, values_from=n), .id='comparison')
+
+print(summary_counts_tb)
+```

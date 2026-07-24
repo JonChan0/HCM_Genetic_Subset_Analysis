@@ -1,0 +1,505 @@
+---
+title: "Comparison of HCMR Case Rare-Variant Carriers on Endophenotype - Summary Tables"
+author: "Jonathan Chan"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide   
+---
+## Import
+
+```{r}
+library(tidyverse)
+rm(list=ls())
+
+source('genetic_subset_analysis/common/hcmr_endophenotype_functions.R')
+```
+
+```{r}
+#This imports in the 915 sarcomere-positive individuals
+hcmr_sarcpos_tb_notransform <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_sarcpos_pheno_rarevarclasses_noNAfiltered_notransform.tsv')
+
+all_merged_overlapvars_tb <- read_tsv('genetic_subset_analysis/RareVar/3_output/individual_class/overlap_variants/hcmr_KT_overlapvariants.tsv') %>%
+  filter(HCR_ID %in% hcmr_sarcpos_tb_notransform$HCR_IDs) #Filter only to the 915 sarcomere-positive individuals
+
+#Identify the number of homozygotes and the number of multiple heterozygotes
+homozygotes <- all_merged_overlapvars_tb %>% 
+  filter(dosage1==2 | dosage2==2) #There are 2 homozygotes 
+multi_het <- all_merged_overlapvars_tb %>%
+  filter(!is.na(dosage2))
+
+print(str_c('There are', nrow(homozygotes), 'homozygotes and',length(unique(multi_het$HCR_ID)),'multiple heterozygotes with ', length(intersect(homozygotes$HCR_ID, multi_het$HCR_ID)),'individual being both so technically',nrow(homozygotes)+length(unique(multi_het$HCR_ID))-length(intersect(homozygotes$HCR_ID, multi_het$HCR_ID)), 'individuals with >1 dose of a rare variant', sep=' '))
+
+#These are all the individuals with >1 dosage of rare variant
+multi_dosage_ids <- unique(c(homozygotes$HCR_ID,multi_het$HCR_ID))
+
+rm(homozygotes, multi_het, all_merged_overlapvars_tb)
+```
+
+```{r}
+pergene_rarevar_classification <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class.tsv')
+pergene_perpatho_rarevar_classification <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class_plp_vusfpvus.tsv')
+```
+
+This outputs the number of individuals in each class.
+
+```{r}
+hcmr_singlevar <- hcmr_sarcpos_tb_notransform %>%
+  filter(!HCR_IDs %in% multi_dosage_ids) %>%
+  left_join(pergene_rarevar_classification, by=c('HCR_IDs'='HCR_ID')) %>%
+  left_join(pergene_perpatho_rarevar_classification, by=c('HCR_IDs'='HCR_ID')) %>%
+  mutate(patho_class = ifelse(str_detect(class_secondary, 'P_LP'), 'P_LP', 'VUS'))
+
+print(hcmr_singlevar %>%
+  group_by(class_primary) %>%
+  summarise(n=n()) %>%
+  arrange(desc(n)))
+
+print(table(hcmr_singlevar$class_primary, hcmr_singlevar$patho_class))
+```
+
+```{r}
+#This code generates the comparison lists
+#For primary classification comparisons
+#For thick vs. thin (excluding ACTC1 from Thin btw)
+thick_class <- unique(hcmr_sarcpos_tb_notransform$class_primary)[!str_detect(unique(hcmr_sarcpos_tb_notransform$class_primary),'ACTC1|TPM1|TNNI3|TNNT2') & str_detect(unique(hcmr_sarcpos_tb_notransform$class_primary),'MYBPC3|MYH7|MYL2|MYL3')]
+thin_class <- unique(hcmr_sarcpos_tb_notransform$class_primary)[str_detect(unique(hcmr_sarcpos_tb_notransform$class_primary),'TPM1|TNNI3|TNNT2') & !str_detect(unique(hcmr_sarcpos_tb_notransform$class_primary),'ACTC1|MYBPC3|MYH7|MYL2|MYL3')]
+
+#For mybpc3_pLOF vs. mybpc3_nonlof
+mybpc3_plof_class <- unique(hcmr_sarcpos_tb_notransform$class_primary)[str_detect(unique(hcmr_sarcpos_tb_notransform$class_primary),'MYBPC3_pLOF') & !str_detect(unique(hcmr_sarcpos_tb_notransform$class_primary),'MYBPC3_nonLOF')]
+mybpc3_nonlof_class <- unique(hcmr_sarcpos_tb_notransform$class_primary)[str_detect(unique(hcmr_sarcpos_tb_notransform$class_primary),'MYBPC3_nonLOF') & !str_detect(unique(hcmr_sarcpos_tb_notransform$class_primary),'MYBPC3_pLOF')]
+
+#For mybpc3 vs. MYH7
+mybpc3_class <- unique(hcmr_sarcpos_tb_notransform$class_primary)[str_detect(unique(hcmr_sarcpos_tb_notransform$class_primary),'MYBPC3') & !str_detect(unique(hcmr_sarcpos_tb_notransform$class_primary),'MYH7')]
+myh7_class <- unique(hcmr_sarcpos_tb_notransform$class_primary)[str_detect(unique(hcmr_sarcpos_tb_notransform$class_primary),'MYH7') & !str_detect(unique(hcmr_sarcpos_tb_notransform$class_primary),'MYBPC3')]
+
+#For secondary classification comparison
+#For P/LP vs. VUS_VUS_FP
+p_lp_class <- unique(hcmr_sarcpos_tb_notransform$class_secondary)[str_detect(unique(hcmr_sarcpos_tb_notransform$class_secondary),'P_LP') & !str_detect(unique(hcmr_sarcpos_tb_notransform$class_secondary), 'VUS')] #I use this because I wish to exclude all the individuals who have a combination across P_LP and VUS_VUS_FP
+vus_vusfp_class <- unique(hcmr_sarcpos_tb_notransform$class_secondary)[str_detect(unique(hcmr_sarcpos_tb_notransform$class_secondary),'VUS') & !str_detect(unique(hcmr_sarcpos_tb_notransform$class_secondary), 'P_LP')] 
+
+#---------------------------------------------------------------------------------------
+#Parameter lists for each comparison
+thick_thin_param_list <- list(thick_class, 'Thick',thin_class, 'Thin')
+mybpc3_plof_nonlof_param_list <- list(mybpc3_plof_class, 'MYBPC3_pLOF', mybpc3_nonlof_class, 'MYBPC3_nonLOF')
+mybpc3_myh7_param_list <- list(mybpc3_class, 'MYBPC3',myh7_class,'MYH7')
+p_lp_vus_vusfp_param_list <- list(p_lp_class, 'P/LP', vus_vusfp_class, 'VUS')
+
+rm(list=ls(pattern='class$'))
+```
+
+## Publication Display Items
+
+This provides the tables for the display items.
+
+### Baseline Summary Table
+
+```{r table_display_item}
+baseline_summary_printer <- function(list_tbs, group_vector_list, var, varname, cont_or_discrete='continuous', order=T){ #Input is a list of tibbles each corresponding to a column
+
+    if(length(list_tbs)==4){
+      k <- 4 #This defaults to using the P/LP vs VUS comparison for total
+    } else{
+      k <- 1 #Otherwise it uses the first tibble in the list of comparison tibbles
+    }
+  
+  if (cont_or_discrete =='continuous'){
+    
+    g1_means <- map2(list_tbs,group_vector_list, ~ mean(filter(.x, group==.y[1])[[var]], na.rm=T)) #Iterates over every comparison_tb
+    g2_means <- map2(list_tbs,group_vector_list, ~ mean(filter(.x, group==.y[2])[[var]], na.rm=T))
+    g1_sdevs <- map2(list_tbs,group_vector_list, ~ sd(filter(.x, group==.y[1])[[var]], na.rm=T))
+    g2_sdevs <- map2(list_tbs,group_vector_list, ~ sd(filter(.x, group==.y[2])[[var]], na.rm=T))
+    
+    total_mean <- mean(list_tbs[[k]][[var]],na.rm=T)
+    total_sd <- sd(list_tbs[[k]][[var]],na.rm=T)
+    
+    output_tb <- bind_cols(g1_means) %>% bind_cols(g1_sdevs) %>%bind_cols(g2_means) %>% bind_cols(g2_sdevs) %>%
+      mutate(Total_mean=total_mean, Total_sd=total_sd) %>%
+      mutate(across(everything(),~round(.,2))) %>%
+      mutate(Phenotype=varname) %>%
+      select(Phenotype, Total_mean, Total_sd,everything())
+    
+    g1_names <- sapply(group_vector_list, "[[", 1)
+    g2_names <- sapply(group_vector_list, "[[", 2)
+    
+    colnames(output_tb) <- c('Phenotype',
+                             'Total_mean',
+                             'Total_sd',
+                         str_c(g1_names,'_mean'),
+                         str_c(g1_names,'_sd'),
+                         str_c(g2_names,'_mean'),
+                         str_c(g2_names,'_sd'))
+  
+    number_comparisons <- length(group_vector_list)
+    number_other_cols <- 3
+    
+    if(isTRUE(order)){
+          #Ordering the columns correctly
+    output_tb <- output_tb %>%
+      select(Phenotype, Total_mean, Total_sd,
+             1+number_other_cols,1+number_comparisons+number_other_cols,1+2*number_comparisons+number_other_cols, 1+3*number_comparisons+number_other_cols,
+             2+number_other_cols,2+number_comparisons+number_other_cols,2+2*number_comparisons+number_other_cols, 2+3*number_comparisons+number_other_cols,
+             3+number_other_cols,3+number_comparisons+number_other_cols,3+2*number_comparisons+number_other_cols, 3+3* number_comparisons+number_other_cols,
+             4+number_other_cols,4+number_comparisons+number_other_cols, 4+2*number_comparisons+number_other_cols,4+3*number_comparisons+number_other_cols
+             )
+    }
+
+    
+  } else if (cont_or_discrete =='discrete'){
+    
+    g1_nums <- map2(list_tbs,group_vector_list, ~ sum(filter(.x, group==.y[1])[[var]], na.rm=T))
+    g2_nums <- map2(list_tbs,group_vector_list, ~ sum(filter(.x, group==.y[2])[[var]], na.rm=T))
+    g1_percent <- map2(list_tbs,group_vector_list, ~ sum(filter(.x, group==.y[1])[[var]], na.rm=T) / sum(!is.na(filter(.x, group==.y[1])[[var]])) * 100)
+    g2_percent <- map2(list_tbs,group_vector_list, ~ sum(filter(.x, group==.y[2])[[var]], na.rm=T)/ sum(!is.na(filter(.x, group==.y[2])[[var]])) * 100)
+    
+    total_num <- sum(list_tbs[[k]][[var]], na.rm=T) 
+    total_percent <- sum(list_tbs[[k]][[var]], na.rm=T) /  sum(!is.na(list_tbs[[k]][[var]])) * 100
+      
+    output_tb <- bind_cols(g1_nums) %>% bind_cols(g1_percent) %>%bind_cols(g2_nums) %>% bind_cols(g2_percent) %>%
+      mutate(Phenotype=varname) %>%
+      mutate(Total_num=total_num, Total_percent=total_percent) %>%
+      select(Phenotype, Total_num, Total_percent,everything())
+    
+    g1_names <- sapply(group_vector_list, "[[", 1)
+    g2_names <- sapply(group_vector_list, "[[", 2)
+    
+    colnames(output_tb) <- c('Phenotype',
+                             'Total_num',
+                             'Total_percent',
+                         str_c(g1_names,'_num'),
+                         str_c(g1_names,'_percent'),
+                         str_c(g2_names,'_num'),
+                         str_c(g2_names,'_percent'))
+    
+    output_tb <-  output_tb %>%
+      mutate(across(ends_with('num'),~round(.,0)),
+             across(ends_with('percent'), ~round(.,1)))
+  
+    number_comparisons <- length(group_vector_list)
+    number_other_cols <- 3
+    
+    if(isTRUE(order)){
+    #Ordering the columns correctly but this assumes 4 comparisons
+    output_tb <- output_tb %>%
+      select(Phenotype,Total_num, Total_percent, 
+             1+number_other_cols,1+number_comparisons+number_other_cols,1+2*number_comparisons+number_other_cols, 1+3*number_comparisons+number_other_cols,
+             2+number_other_cols,2+number_comparisons+number_other_cols,2+2*number_comparisons+number_other_cols, 2+3*number_comparisons+number_other_cols,
+             3+number_other_cols,3+number_comparisons+number_other_cols,3+2*number_comparisons+number_other_cols, 3+3* number_comparisons+number_other_cols,
+             4+number_other_cols,4+number_comparisons+number_other_cols, 4+2*number_comparisons+number_other_cols,4+3*number_comparisons+number_other_cols
+             )
+    }
+  }
+  
+  return(output_tb)
+}
+```
+
+This provides the baseline summary table output (Table 1) of the 892 sarcomere-positive patients (915 sarcpos --> 892 single-variant individuals).
+
+```{r baseline_table}
+baseline_cont_phenos <- c('age','bmi','holvtrun') #As per Neubaeur et al, 2019
+baseline_cont_phenonames <- c('Age (years)','BMI (kg/msq)','Number of VT Runs')
+baseline_discrete_phenos <- c('N','genderMale','race_white','race_black','race_SA','race_EA','race_other','hxhcm1st','hxhcm2nd','hxhcm1st2nd','hxhtn','diatyp2','cursmoke','nyha1','nyha2','nyha3_4','hxsync','hxhf','hxstrk','holtnsvt','hxafib_persist','hxafib_paroxy','blcp','bldysp','blbeta','blcalc','blacearb','bldisop','blstat','bldiur','blantico','blantipl')
+baseline_discrete_phenonames <- c('N','Male','White','Black','South Asian','East Asian','Other','1st degree','2nd degree', 'Both 1st and 2nd','Hypertension','Type 2 Diabetes', 'Current Smoker', 'Class I','Class II','Class III/IV','Syncope','Heart Failure', 'Stroke','Non-sustained Ventricular Tachycardia','Persistent','Paroxysysmal','Chest Pain','Dyspnea','Beta-blockers','Calcium-channel blocker','ACE/ARB', 'Disopyramide','Statins','Diuretics','Oral anticoagulant','Oral antiplatelet agent')
+
+baseline_tb<- hcmr_sarcpos_tb_notransform %>%
+  mutate(genderMale=ifelse(gender=='Male',T,F)) %>%
+  mutate(race_white=ifelse(race=='White',T,F),
+         race_black = ifelse(race=='Black/Afr.Am',T,F),
+         race_SA=ifelse(race =='SA',T,F),
+         race_EA=ifelse(race=='EA',T,F),
+         race_other=ifelse(race %in% c('Pacific Islander',' American Indian/Alaskan'),T,F)) %>%
+  mutate(hxhcm1st = ifelse(hxhcm1st >=1,T,F),
+         hxhcm2nd=ifelse(hxhcm2nd >=1, T, F)) %>%
+  mutate(hxhcm1st2nd = ifelse(hxhcm1st & hxhcm2nd, T, F)) %>%
+  mutate(nyha1=ifelse(blnyha==1, T,F),
+         nyha2=ifelse(blnyha==2,T,F),
+         nyha3_4=ifelse(blnyha %in% c(3,4),T,F)) %>%
+  mutate(hxafib_persist=ifelse(hxafib=='Persistent',T,F),
+         hxafib_paroxy=ifelse(hxafib=='Paroxysmal',T,F)) %>%
+  mutate(N=1) %>%
+  select(HCR_IDs, class_primary, class_secondary, all_of(baseline_cont_phenos),all_of(baseline_discrete_phenos))
+
+baseline_tb_singlevar <- baseline_tb %>%
+    filter(!HCR_IDs %in% multi_dosage_ids)#Filter for only 892 single-variant individuals
+```
+
+This outputs the baseline summary tables for the entire 892 individuals as well as the  pairwise comparisons.
+
+```{r}
+#This creates the sub-tables across the binary comparisons made
+temp <- map(list(thick_thin_param_list,mybpc3_plof_nonlof_param_list,mybpc3_myh7_param_list),~comparison_pheno_tb_gen(phenotype_tb = baseline_tb_singlevar, param_list=.,rarevar_class_tb = pergene_rarevar_classification, var_class='primary'))
+names(temp) <- c('thick_thin_tb','mybpc3_plof_nonlof_tb','mybc3_myh7_tb')
+
+temp2<- map(list(p_lp_vus_vusfp_param_list),~comparison_pheno_tb_gen(phenotype_tb = baseline_tb_singlevar, param_list=.,rarevar_class_tb = pergene_perpatho_rarevar_classification, var_class='secondary'))
+names(temp2) <- c('p_lp_vus_vusfp_tb')
+
+comparison_tbs_baseline <- c(temp, temp2)
+rm(temp,temp2)
+
+#Collating the list of tibbles 
+group_list <- list(c('Thick','Thin'),
+                    c('MYBPC3_pLOF','MYBPC3_nonLOF'),
+                    c('MYBPC3','MYH7'),
+                    c('P/LP','VUS'))
+
+baseline_cont_summary_tb <- map2(baseline_cont_phenos, baseline_cont_phenonames, ~baseline_summary_printer(comparison_tbs_baseline,group_list,.x,.y)) %>% bind_rows()
+baseline_discrete_summary_tb <- map2(baseline_discrete_phenos, baseline_discrete_phenonames, ~baseline_summary_printer(comparison_tbs_baseline,group_list,.x,.y, cont_or_discrete = 'discrete')) %>% bind_rows()
+
+write_csv(baseline_cont_summary_tb, 'genetic_subset_analysis/RareVar/3_output/summary_tbs/baseline_summary_continuous.csv')
+write_csv(baseline_discrete_summary_tb, 'genetic_subset_analysis/RareVar/3_output/summary_tbs/baseline_summary_discrete.csv')
+```
+
+This outputs the baseline summary tables for the multi-dosage individuals vs. single-dosage individuals.
+
+```{r}
+#Repeat for the multiple dosage individuals only
+baseline_tb_multivar <- baseline_tb %>%
+  mutate(group = case_when(HCR_IDs %in% multi_dosage_ids~'Multi',
+                           T~'Single'))
+
+#Outputting the summary tibbles
+baseline_cont_summary_tb_multiple <- map2(baseline_cont_phenos, baseline_cont_phenonames, ~baseline_summary_printer(list(baseline_tb_multivar),list(c('Single','Multi')),.x,.y, order=F))  %>% bind_rows()
+
+baseline_discrete_summary_tb_multiple <- map2(baseline_discrete_phenos, baseline_discrete_phenonames, ~baseline_summary_printer(list(baseline_tb_multivar),list(c('Single','Multi')),.x,.y, order=F, cont_or_discrete = 'discrete'))  %>% bind_rows()
+
+write_csv(baseline_cont_summary_tb_multiple, 'genetic_subset_analysis/RareVar/3_output/summary_tbs/baseline_summary_multiple_continuous.csv')
+write_csv(baseline_discrete_summary_tb_multiple, 'genetic_subset_analysis/RareVar/3_output/summary_tbs/baseline_summary_multiple_discrete.csv')
+
+rm(list=ls(pattern='summary_tb'))
+rm(list=ls(pattern='baseline'))
+```
+
+### CMR Phenotype Table
+
+This plots the summary tables but focusing on the endophenotypes specifically.
+
+This creates the comparison tibbles.
+```{r}
+#Define the continuous parameters you want to get a summary for
+phenos_of_interest <- c('lge_total','wallthkmax','lvmassi','lge_total','ecvfwhole','lvef','lvs_ellmean','lvs_eccmean','lvs_errmean')
+
+cmr_tb <- hcmr_sarcpos_tb_notransform %>%
+  mutate(N=1) %>%
+  select(HCR_IDs, class_primary, class_secondary, all_of(phenos_of_interest))
+
+cmr_tb_singlevar <- cmr_tb %>%
+    filter(!HCR_IDs %in% multi_dosage_ids)#Filter for only 892 single-variant individuals
+
+#This creates the sub-tables across the binary comparisons made
+temp <- map(list(thick_thin_param_list,mybpc3_plof_nonlof_param_list,mybpc3_myh7_param_list),~comparison_pheno_tb_gen(phenotype_tb = cmr_tb_singlevar, param_list=.,rarevar_class_tb = pergene_rarevar_classification, var_class='primary'))
+names(temp) <- c('thick_thin_tb','mybpc3_plof_nonlof_tb','mybc3_myh7_tb')
+
+temp2<- map(list(p_lp_vus_vusfp_param_list),~comparison_pheno_tb_gen(phenotype_tb = cmr_tb_singlevar, param_list=.,rarevar_class_tb = pergene_perpatho_rarevar_classification, var_class='secondary'))
+names(temp2) <- c('p_lp_vus_vusfp_tb')
+
+comparison_tbs_cmr <- c(temp, temp2)
+rm(temp,temp2, phenos_of_interest)
+```
+
+```{r cmr_phenotype_table}
+continuous_summary_printer <- function(list_tbs, group_vector_list, varlist, mean_or_median='mean', column_order=T){ #Input is a list of tibbles each corresponding to a column
+    
+  var=varlist[[1]]
+  varname=varlist[[2]]
+  
+  if(mean_or_median=='mean'){
+    g1_means <- map2(list_tbs,group_vector_list, ~ mean(filter(.x, group==.y[1])[[var]], na.rm=T)) #Iterates over every comparison_tb
+    g2_means <- map2(list_tbs,group_vector_list, ~ mean(filter(.x, group==.y[2])[[var]], na.rm=T))
+    g1_sdevs <- map2(list_tbs,group_vector_list, ~ sd(filter(.x, group==.y[1])[[var]], na.rm=T))
+    g2_sdevs <- map2(list_tbs,group_vector_list, ~ sd(filter(.x, group==.y[2])[[var]], na.rm=T))
+    pvals <- map2(list_tbs, group_vector_list, ~ wilcox.test(filter(.x, group==.y[1])[[var]],filter(.x, group==.y[2])[[var]], na.action='na.omit')$p.value)
+    
+    total_mean <- mean(list_tbs[[1]][[var]],na.rm=T)
+    total_sd <- sd(list_tbs[[1]][[var]],na.rm=T)
+    
+    output_tb <- bind_cols(g1_means) %>% bind_cols(g1_sdevs) %>%bind_cols(g2_means) %>% bind_cols(g2_sdevs) %>%
+      mutate(Total_mean=total_mean, Total_sd=total_sd) %>%
+      mutate(across(everything(),~round(.,2))) %>%
+      bind_cols(pvals) %>%
+      mutate(Phenotype=varname) %>%
+      select(Phenotype, Total_mean, Total_sd,everything())
+    
+    g1_names <- sapply(group_vector_list, "[[", 1)
+    g2_names <- sapply(group_vector_list, "[[", 2)
+    
+    colnames(output_tb) <- c('Phenotype',
+                             'Total_mean',
+                             'Total_sd',
+                         str_c(g1_names,'_mean'),
+                         str_c(g1_names,'_sd'),
+                         str_c(g2_names,'_mean'),
+                         str_c(g2_names,'_sd'),
+                         str_c(g1_names,'_vs_',g2_names,'_pval'))
+    
+    output_tb <- output_tb %>%
+      mutate(across(ends_with('pval'), ~signif(.,2)))
+
+    number_comparisons <- length(group_vector_list)
+    number_other_cols <- 3
+    
+    if(isTRUE(column_order)){
+          #Ordering the columns correctly - N.B This assumes that there are 4 comparisons
+    output_tb <- output_tb %>%
+      select(Phenotype, Total_mean, Total_sd,
+             1+number_other_cols,1+number_comparisons+number_other_cols,1+2*number_comparisons+number_other_cols, 1+3*number_comparisons+number_other_cols,4+3*number_comparisons+number_other_cols+1,
+             2+number_other_cols,2+number_comparisons+number_other_cols,2+2*number_comparisons+number_other_cols, 2+3*number_comparisons+number_other_cols,4+3*number_comparisons+number_other_cols+2,
+             3+number_other_cols,3+number_comparisons+number_other_cols,3+2*number_comparisons+number_other_cols, 3+3* number_comparisons+number_other_cols,4+3*number_comparisons+number_other_cols+3,
+             4+number_other_cols,4+number_comparisons+number_other_cols, 4+2*number_comparisons+number_other_cols,4+3*number_comparisons+number_other_cols,4+3*number_comparisons+number_other_cols+4,
+             )
+    }
+
+  
+  } else if (mean_or_median=='median'){
+    
+    g1_medians <- map2(list_tbs,group_vector_list, ~ median(filter(.x, group==.y[1])[[var]], na.rm=T)) #Iterates over every comparison_tb
+    g2_medians <- map2(list_tbs,group_vector_list, ~ median(filter(.x, group==.y[2])[[var]], na.rm=T))
+    g1_fqs <- map2(list_tbs,group_vector_list, ~ quantile(filter(.x, group==.y[1])[[var]],0.25, na.rm=T))
+    g2_fqs <- map2(list_tbs,group_vector_list, ~ quantile(filter(.x, group==.y[2])[[var]],0.25, na.rm=T))
+    g1_tqs <- map2(list_tbs,group_vector_list, ~ quantile(filter(.x, group==.y[1])[[var]],0.75, na.rm=T))
+    g2_tqs <- map2(list_tbs,group_vector_list, ~ quantile(filter(.x, group==.y[2])[[var]],0.75, na.rm=T))
+    pvals <- map2(list_tbs, group_vector_list, ~ wilcox.test(filter(.x, group==.y[1])[[var]],filter(.x, group==.y[2])[[var]], na.action='na.omit')$p.value)
+    
+    total_median <- median(list_tbs[[1]][[var]],na.rm=T)
+    total_fq <- quantile(list_tbs[[1]][[var]],0.25,na.rm=T)
+    total_tq <- quantile(list_tbs[[1]][[var]],0.75,na.rm=T)
+    
+    output_tb <- bind_cols(g1_medians) %>% bind_cols(g1_fqs) %>%bind_cols(g1_tqs) %>% bind_cols(g2_medians) %>%bind_cols(g2_fqs) %>% bind_cols(g2_tqs) %>% 
+      mutate(Total_median=total_median, Total_fq=total_fq, Total_tq=total_tq) %>%
+      mutate(across(everything(),~round(.,2))) %>%
+      bind_cols(pvals) %>%
+      mutate(Phenotype=varname) %>%
+      mutate(Total = str_c(Total_median,' (',Total_fq,'-',Total_tq,')')) %>%
+      select(Phenotype, Total, everything()) %>%
+      select(-Total_median, -Total_fq, -Total_tq)
+    
+    g1_names <- sapply(group_vector_list, "[[", 1)
+    g2_names <- sapply(group_vector_list, "[[", 2)
+    
+    colnames(output_tb) <- c('Phenotype',
+                             'Total',
+                         str_c(g1_names,'_median'),
+                         str_c(g1_names,'_fq'),
+                         str_c(g1_names,'_tq'),
+                         str_c(g2_names,'_median'),
+                         str_c(g2_names,'_fq'),
+                         str_c(g2_names,'_tq'),
+                         str_c(g1_names,'_vs_',g2_names,'_pval'))
+    
+     output_tb <- output_tb %>%
+      mutate(across(ends_with('pval'), ~signif(.,2)))
+    
+    for (name in c(g1_names, g2_names)){
+      median_colname <- str_c(name, '_median')
+      fq_colname <- str_c(name,'_fq')
+      tq_colname <- str_c(name,'_tq')
+      
+      output_tb[[name]] <- str_c(output_tb[[median_colname]],' (', output_tb[[fq_colname]],'-',output_tb[[tq_colname]],')')
+    }
+     
+     output_tb <- output_tb %>%
+       select(Phenotype, Total, all_of(c(g1_names, g2_names)),ends_with('pval'))
+     
+    number_comparisons <- length(group_vector_list)
+    number_other_cols <- 2
+    
+        if(isTRUE(column_order)){
+    #Ordering the columns correctly N.B This assumes 4 comparisons
+    output_tb <- output_tb %>%
+      select(Phenotype, Total,
+             1+number_other_cols,1+number_comparisons+number_other_cols,4+number_comparisons+number_other_cols+1,
+             2+number_other_cols,2+number_comparisons+number_other_cols,4+number_comparisons+number_other_cols+2,
+             3+number_other_cols,3+number_comparisons+number_other_cols,4+number_comparisons+number_other_cols+3,
+             4+number_other_cols,4+number_comparisons+number_other_cols,4+number_comparisons+number_other_cols+4,
+             )
+        }
+      
+  }
+  
+  return(output_tb)
+}
+```
+
+```{r}
+continuous_param_list_for_summary<- list(
+  c('wallthkmax','Maximal LV Wall Thickness (mm)'),
+  c('lvmassi','Left Ventricular Mass Index (g/m2)'),
+  c('ecvfwhole','Whole LV Extracellular Volume Fraction (%)'),
+  c('lvef','Left ventricular Ejection Fraction (%)'),
+  c('lvs_ellmean','-Longitudinal LV Strain'),
+  c('lvs_eccmean','-Circumferential LV Strain'),
+  c('lvs_errmean','Radial LV Strain')
+)
+lge_summary_vector <- c('lge_total','Total LGE over All Segments (6 SD) (%)')
+
+#This creates the summary_tb itself
+continuous_summary_tb <- map(continuous_param_list_for_summary, ~continuous_summary_printer(comparison_tbs_cmr, group_list,., mean_or_median='mean')) %>% bind_rows()
+lge_summary_tb <-  continuous_summary_printer(comparison_tbs_cmr, group_list,lge_summary_vector, mean_or_median='median') %>% bind_rows()
+
+write_csv(continuous_summary_tb, 'genetic_subset_analysis/RareVar/3_output/summary_tbs/cmrpheno_summary_continuous.csv')
+write_csv(lge_summary_tb, 'genetic_subset_analysis/RareVar/3_output/summary_tbs/cmrlge_summary_continuous.csv')
+
+rm(continuous_summary_tb, lge_summary_tb, comparison_tbs_cmr, group_list)
+```
+
+This compares the single vs. multi-variant individuals on the CMR endophenotypes.
+
+```{r multidosage_phenotype_table}
+cmr_tb_multivar <- cmr_tb %>%
+  mutate(group = case_when(HCR_IDs %in% multi_dosage_ids~'Multi',
+                           T~'Single'))
+
+group_list <- list(c('Single','Multi'))
+
+#Outputting the summary tibbles
+continuous_summary_tb <- map(continuous_param_list_for_summary, ~continuous_summary_printer(list(cmr_tb_multivar), group_list,., mean_or_median='mean',column_order=F)) %>% bind_rows()
+lge_summary_tb <-  continuous_summary_printer(list(cmr_tb_multivar), group_list,lge_summary_vector, mean_or_median='median',column_order=F) %>% bind_rows()
+
+write_csv(continuous_summary_tb, 'genetic_subset_analysis/RareVar/3_output/summary_tbs/multivssingle_cmrpheno_summary_continuous.csv')
+write_csv(lge_summary_tb, 'genetic_subset_analysis/RareVar/3_output/summary_tbs/multivssingle_cmrlge_summary_continuous.csv')
+
+rm(list=ls(pattern='summary_tb'))
+rm(list=ls(pattern='cmr'))
+```
+
+This outputs the hazard ratios as a Table 3 for each pairwise comparison.
+
+```{r}
+cox_results_tb <- read_rds('genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/hcmr_rarevar_subset_cox_age_timescale.rds')
+
+cox_results_summary_tb <- cox_results_tb %>%
+  mutate(Comparison = str_replace_all(Group, "\\\n", ' ')) %>%
+  filter(Comparison %in% c('Thick vs. Thin',
+                           'MYBPC3_pLOF vs. MYBPC3_nonLOF',
+                           'MYBPC3 vs. MYH7',
+                           'Sarcomere-P/LP vs. Sarcomere-VUS')) %>%
+  select(Comparison, Composite=composite, HR=hr, HR_lowerCI=hr_low, HR_upperCI=hr_high, pval=p.value) %>%
+  mutate(HR=round(HR,2),
+         HR_lowerCI=round(HR_lowerCI,2),
+         HR_upperCI=round(HR_upperCI,2),
+         pval=signif(pval,2)) %>%
+  mutate(HR_CI = str_c(HR,' (',HR_lowerCI,'-',HR_upperCI,')')) %>%
+  select(Comparison, Composite, HR_CI, pval)
+
+write_tsv(cox_results_summary_tb, 'genetic_subset_analysis/RareVar/3_output/summary_tbs/cox_results_summary.tsv')
+```
+
+This outputs the hazard ratios for the single-vs-multiple as a Supp. Table.
+
+
+```{r}
+cox_results_tb <- read_rds('genetic_subset_analysis/RareVar/3_output/plots/2_Severity/1_Cox/1_AgeAsTimescale/hcmr_rarevar_subset_cox_age_timescale_multi.rds')
+
+cox_results_summary_tb <- cox_results_tb %>%
+  mutate(Comparison = str_replace_all(Group, "\\\n", ' ')) %>%
+  filter(Comparison %in% c('Multi vs. Single')) %>%
+  select(Comparison, Composite=composite, HR=hr, HR_lowerCI=hr_low, HR_upperCI=hr_high, pval=p.value) %>%
+  mutate(HR=round(HR,2),
+         HR_lowerCI=round(HR_lowerCI,2),
+         HR_upperCI=round(HR_upperCI,2),
+         pval=signif(pval,2)) %>%
+  mutate(HR_CI = str_c(HR,' (',HR_lowerCI,'-',HR_upperCI,')')) %>%
+  select(Comparison, Composite, HR_CI, pval)
+
+write_tsv(cox_results_summary_tb, 'genetic_subset_analysis/RareVar/3_output/summary_tbs/cox_results_summary_multi.tsv')
+```

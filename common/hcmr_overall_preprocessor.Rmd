@@ -1,0 +1,95 @@
+---
+title: "Preprocessing of HCMR Data Overall "
+author: "Jonathan Chan"
+date: "2026-01-23"
+output: 
+  html_document:
+    code_folding: hide   
+---
+
+```{r}
+library(tidyverse)
+library(readxl)
+rm(list = ls())
+
+#Open project in EDA_HCMR/ folder
+```
+
+This preprocesses the original HCMR dataset to get the actual individuals used for analysis in the genetic subset analyses.
+
+```{r}
+total_df <- read_excel('./data/HCMRBaselineDataset_2022-04-13.xlsx')  #2750
+
+# #HCR IDs represent the unique identifiers for HCMR participants in the amplicon-based sequencing
+HCR_IDs <- read_excel('./data/HCMRBaselineDataset_2020-02-28.xlsx',
+                                      sheet='Sheet1') #This imports in the mapping between sitePatID and HCMR
+total_df <- left_join(total_df, HCR_IDs %>% select(sitePatID, HCR_IDs), by='sitePatID')
+
+#This represents the hard-call genotyped HCMR individuals
+geno_hcmr_ids <- read_delim('hcmr_ids2.list', col_names=F, delim=' ') %>%
+  select(HCR_IDs = X1)
+
+#Convert false positive individuals to sarcomere-negative individuals (due to false positive MYBPC3-VUS variants)
+falsepositive_mybpc3_vus_individuals <- readRDS('genetic_subset_analysis/common/falsepositive_mybpc3_vus_individuals.rds')
+total_df <- total_df %>%
+  mutate(sarcomere = ifelse(HCR_IDs %in% falsepositive_mybpc3_vus_individuals, FALSE, sarcomere)) #MYBPC3-VUS individuals incorrectly classified as sarcomere-positive
+
+#This represents the duplicate HCR_IDs which are anomalous and represent sample mismatch/mislabelling
+dup_hcr_ids <- total_df %>%
+  group_by(HCR_IDs) %>%
+  tally() %>%
+  filter(n > 1) %>%
+  pull(HCR_IDs)
+
+#Start filtering
+total_df <- total_df %>%
+    filter(!is.na(age), age!=0, !is.na(gender)) #2750 - 2686 = 64 individuals
+total_df <- total_df %>%
+  filter(!is.na(HCR_IDs), !HCR_IDs %in% dup_hcr_ids) #2686 - 2628 individuals = 58 not amplicon-sequenced
+total_df <- total_df %>%
+    filter(!is.na(sarcomere)) #2628 - 2558 individuals = 70 with missing sarcomeric mutation status (so combined =128 individuals )
+
+write_tsv(select(total_df,sitePatID, HCR_IDs), './genetic_subset_analysis/common/output/data/hcmr_agesex_rare_filtered_2558.tsv')
+
+total_df <- total_df %>%
+    filter(HCR_IDs %in% geno_hcmr_ids$HCR_IDs) #2558 - 2446 individuals = 112 individuals without array data
+write_tsv(select(total_df,sitePatID, HCR_IDs) ,'./genetic_subset_analysis/common/output/data/hcmr_agesex_rare_common_filtered_2446.tsv')
+
+#This is how you go from 2750 --> 2446 individuals
+```
+
+This represents the submission to Christian Topriceanu at Carolyn Ho's group to provide rare genotype data of 2558 individuals
+
+```{r}
+topriceanu_tb <- total_df %>% 
+  select(sitePatID, HCR_IDs, sarcomere)
+
+hcmr_rarevar_class <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class_plp_vusfpvus.tsv') %>%
+  mutate(Other_P_LP = rowSums(across(MYL2_P_LP:FHOD3_P_LP), na.rm=T),
+        VUS_FP_VUS = rowSums(across(contains('VUS_FP_VUS')),na.rm=T)) %>%
+  select(HCR_IDs=HCR_ID, MYBPC3_P_LP, MYH7_P_LP, Other_P_LP, VUS_FP_VUS)
+
+#Map back onto initial tb
+topriceanu_tb <- topriceanu_tb %>%
+  left_join(hcmr_rarevar_class, by='HCR_IDs')
+
+#Double check that all of the sarcomere positive individuals have a corresponding variant
+topriceanu_tb <- topriceanu_tb %>%
+  mutate(doublecheck_sarc = rowSums(across(MYBPC3_P_LP:VUS_FP_VUS), na.rm=T)) %>%
+  mutate(doublecheck_sarc = ifelse(doublecheck_sarc>1, 1, doublecheck_sarc))
+
+print(nrow(filter(topriceanu_tb, sarcomere != doublecheck_sarc))) #0 means all clear
+
+topriceanu_tb <- topriceanu_tb %>%
+  mutate(rare_genotype_group = case_when(
+    sarcomere==0 ~ 'genotype-negative',
+    MYBPC3_P_LP >= 1 ~'MYBPC3_P_LP',
+    MYH7_P_LP >= 1 ~ 'MYH7_P_LP',
+    Other_P_LP >= 1 ~ 'Other_P_LP',
+    VUS_FP_VUS >=1 ~ 'VUS'
+  )) %>%
+    select(sitePatID, HCR_IDs, rare_genotype_group)
+
+table(topriceanu_tb$rare_genotype_group)
+write_tsv(topriceanu_tb, 'genetic_subset_analysis/common/output/260507_topriceanu_ho_HCMR_rare_genotypes_2558.tsv')
+```
