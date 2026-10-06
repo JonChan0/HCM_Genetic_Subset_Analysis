@@ -1,0 +1,483 @@
+---
+title: "Comparison of HCMR Case Rare-Variant Carriers on Endophenotype - Powell Classification"
+author: "Jonathan Chan"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(viridis)
+library(factoextra)
+library(tictoc)
+library(readxl)
+
+rm(list=ls())
+
+theme_set(theme_classic(base_size=14))
+
+source('genetic_subset_analysis/common/hcmr_endophenotype_functions.R')
+```
+
+This reruns HCMR_RareVar_Subset_Comparison_Endophenotype_Analysis.Rmd as a sensitivity analysis but using George Powell's variant classifications (output of RareVar_Classification/HCMR_RareVar_Classification_Powell.Rmd) instead of the KT classifications.
+
+Differences vs. the main analysis:
+
+- Sarcomere-positive = carries >=1 Powell SARC+ variant (rather than KT sarcomere status with the MYBPC3-VUS false-positive correction)
+- Powell's classification has no pathogenicity tier, so the P/LP vs. VUS comparison is not performed (3 comparisons only)
+- All outputs are written with a _powell suffix or to a Powell/ subdirectory so the main analysis outputs are not overwritten
+
+## Import
+
+```{r import, echo=F}
+#Import in the total_df_notransform from EDA_HCMR.Rmd
+hcmr_ids_of_interest <- read_tsv('genetic_subset_analysis/common/output/data/hcmr_agesex_rare_filtered_2558.tsv')
+hcmr_tb <- readRDS('output/data/total_notransform_nogenofilter_df.rds') %>% #I use the 2750 -> filtered for those who have HCR IDs (2677) (i.e. without filtering for hard-called genotypes)
+  distinct()
+
+hcmr_tb <- hcmr_tb %>%
+  filter(HCR_IDs %in% hcmr_ids_of_interest$HCR_IDs) #Now filter to those individuals of interest
+
+pergene_rarevar_classification <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class_powell.tsv')
+hcmr_tb <- hcmr_tb %>%
+  mutate(sarcomere_kt = sarcomere) %>% #Retain the original (KT) sarcomere status for the classification comparison below
+  mutate(sarcomere = HCR_IDs %in% pergene_rarevar_classification$HCR_ID) #Sarcomere-positive redefined as carrying >=1 Powell SARC+ variant
+
+rm(hcmr_ids_of_interest)
+
+output_data_dir <- 'genetic_subset_analysis/RareVar/3_output/data/'
+output_plot_dir <- 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/Powell/'
+walk(str_c(output_plot_dir, c('0_Classification_Comparison/','1_LM/','2_Wilcoxon/')), ~dir.create(., showWarnings=F, recursive=T))
+```
+
+## Variant Classification Comparison: KT vs. Powell
+
+This compares sarcomere-positive status under the original (KT) variant classification (sarcomere==TRUE in hcmr_tb) against the Powell classification (carrying >=1 Powell SARC+ variant), within the analysed HCMR cohort.
+
+N.B. KT status here is the raw sarcomere column, i.e. without the MYBPC3-VUS false-positive correction used in the main analysis.
+
+```{r classification_comparison}
+class_comparison_tb <- hcmr_tb %>%
+  select(HCR_IDs, sarcomere_kt, sarcomere_powell = sarcomere) %>%
+  distinct() %>%
+  left_join(select(pergene_rarevar_classification, HCR_ID, powell_class = class), by=c('HCR_IDs'='HCR_ID')) %>%
+  mutate(concordance = case_when(
+    is.na(sarcomere_kt) ~ 'KT status missing',
+    sarcomere_kt & sarcomere_powell ~ 'SARC+ in both',
+    !sarcomere_kt & !sarcomere_powell ~ 'SARC- in both',
+    sarcomere_kt & !sarcomere_powell ~ 'SARC+ in KT only',
+    !sarcomere_kt & sarcomere_powell ~ 'SARC+ in Powell only'
+  ))
+
+print(str_glue('{sum(class_comparison_tb$sarcomere_kt, na.rm=T)} sarcomere-positive individuals as per KT classification (of {nrow(class_comparison_tb)}; {sum(is.na(class_comparison_tb$sarcomere_kt))} with missing KT status)'))
+print(str_glue('{sum(class_comparison_tb$sarcomere_powell)} sarcomere-positive individuals as per Powell classification (of {nrow(class_comparison_tb)})'))
+print(str_glue('{sum(!pergene_rarevar_classification$HCR_ID %in% class_comparison_tb$HCR_IDs)} Powell SARC+ individuals are not in the analysed HCMR cohort'))
+
+#Concordance counts
+class_comparison_tb %>%
+  count(concordance) %>%
+  mutate(pct = round(100 * n / sum(n), 1))
+
+#2x2 contingency table (KT rows x Powell columns), excluding missing KT status
+class_comparison_complete_tb <- class_comparison_tb %>%
+  filter(!is.na(sarcomere_kt)) %>%
+  mutate(across(c(sarcomere_kt, sarcomere_powell), ~factor(if_else(., 'SARC+', 'SARC-'), levels=c('SARC+','SARC-'))))
+
+class_contingency <- table(KT = class_comparison_complete_tb$sarcomere_kt, Powell = class_comparison_complete_tb$sarcomere_powell)
+addmargins(class_contingency)
+
+#Agreement statistics: % agreement, Cohen's kappa and McNemar's test for asymmetry in discordant pairs
+po <- sum(diag(class_contingency)) / sum(class_contingency)
+pe <- sum(rowSums(class_contingency) * colSums(class_contingency)) / sum(class_contingency)^2
+kappa <- (po - pe) / (1 - pe)
+print(str_glue('Percentage agreement: {round(100 * po, 1)}%; Cohen\'s kappa: {round(kappa, 3)}'))
+mcnemar.test(class_contingency)
+
+write_tsv(class_comparison_tb, str_c(output_data_dir, 'hcmr_sarcomere_kt_vs_powell_comparison.tsv'))
+```
+
+This plots the 2x2 contingency table as a heatmap.
+
+```{r classification_comparison_plot, fig.width=6, fig.height=5}
+class_contingency_plot <- as_tibble(class_contingency) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ggplot(aes(x = Powell, y = KT, fill = n)) +
+  geom_tile(colour = 'white') +
+  geom_text(aes(label = str_c(n, '\n(', round(pct, 1), '%)')), size = 5, colour = 'white') +
+  scale_fill_viridis(option = 'D', end = 0.85) +
+  scale_y_discrete(limits = rev) +
+  labs(x = 'Powell Classification', y = 'KT Classification', fill = 'N',
+       title = 'Sarcomere Status: KT vs. Powell',
+       subtitle = str_glue('Agreement = {round(100 * po, 1)}%; Cohen\'s kappa = {round(kappa, 3)}'))
+
+print(class_contingency_plot)
+ggsave(str_c(output_plot_dir, '0_Classification_Comparison/sarcomere_kt_vs_powell_contingency.png'), class_contingency_plot, width=6, height=5, dpi=300)
+```
+
+This breaks down the Powell per-gene class for Powell sarcomere-positive individuals by concordance with KT, to show which genes/variant types drive the discordance.
+
+```{r classification_comparison_breakdown}
+class_comparison_tb %>%
+  filter(sarcomere_powell) %>%
+  count(concordance, powell_class) %>%
+  pivot_wider(names_from = concordance, values_from = n, values_fill = 0) %>%
+  arrange(desc(rowSums(across(where(is.numeric)))))
+
+rm(class_comparison_complete_tb, class_contingency, class_contingency_plot, po, pe, kappa)
+```
+
+## Phenotypes for Comparison
+
+The following phenotypes will be analysed each reflecting some component of HCM disease.
+
+- Hypertrophy: wallthkmax; lvmassi
+- Fibrosis: lge_total; ecvfwhole
+- Hypercontractility: LVEF (from CMR) and LV strain parameters (lvs_ellmean; eccmean; errmean)
+
+Note that lge_total is treated both as a continuous and a discrete trait via binning.
+
+```{r phenotype_tb}
+phenos_of_interest <- c('lge_total','wallthkmax','lvmassi','lge_total','ecvfwhole','lvef','lvs_ellmean','lvs_eccmean','lvs_errmean')
+contphenos <- phenos_of_interest
+
+continuous_param_list <- list(
+  c('wallthkmax','Maximal LV Wall Thickness (mm)'),
+  c('lvmassi','LV Mass Index (g/m2)'),
+  c('lge_total','LGE Mass over All Segments / LV Mass (%)'),
+  c('ecvfwhole','Whole LV Extracellular Volume Fraction (%)'),
+  c('lvef','LV Ejection Fraction (%)'),
+  c('lvs_ellmean','-Longitudinal LV Strain'),
+  c('lvs_eccmean','-Circumferential LV Strain'),
+  c('lvs_errmean','Radial LV Strain')
+)
+names(continuous_param_list) <- map_chr(continuous_param_list, ~.[[1]])
+
+label_tb <- read_tsv('output/data/combo_labels_20260123.tsv')
+```
+
+```{r sarcpos_filter}
+print(str_glue('Filtering out {nrow(hcmr_tb) - nrow(hcmr_tb %>% filter(sarcomere==T))} Powell sarcomere-negative individuals from HCMR cohort for analysis.'))
+
+hcmr_sarcpos_tb <- hcmr_tb %>%
+  filter(sarcomere==T) #Filter to only Powell sarcomere-positive individuals
+
+print(str_glue('There are {length(unique(hcmr_sarcpos_tb$HCR_IDs))} sarcomere-positive individuals as per Powell classification'))
+```
+
+### Phenotype Tibble Builder
+
+This builds a single overall phenotype tibble with the primary rare variant classification (per-gene) from Powell's SARC+ variants.
+
+```{r}
+#Build the phenotype tibble with the Powell per-gene classification
+hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>%
+  left_join(select(pergene_rarevar_classification,HCR_ID, class_primary=class), by=c('HCR_IDs'='HCR_ID'))
+
+#Some phenotype-specific preprocessing
+hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>%
+    mutate(lge_total_bin = case_when(lge_total==0 ~ '0%',
+                                     lge_total >0 & lge_total <=5 ~ '0-5%',
+                                     lge_total > 5 & lge_total <=10 ~ '5-10%',
+                                     lge_total > 10 & lge_total <= 15 ~ '10-15%',
+                                     lge_total > 15 ~ '>15%',
+                                     T~NA)) %>%
+    mutate(lge_total_bin = factor(lge_total_bin, levels=c('0%','0-5%','5-10%','10-15%','>15%'), ordered=T)) %>%
+    mutate(ecvfwhole=ecvfwhole * 100)
+
+#Output the hcmr_sarcpos_tb with primary class attached and with no transformation and without filtering for the NA values in the endophenotypes of interest
+hcmr_sarcpos_tb_noNAfiltered <- hcmr_sarcpos_tb
+write_tsv(hcmr_sarcpos_tb_noNAfiltered, str_c(output_data_dir, 'hcmr_sarcpos_pheno_rarevarclasses_noNAfiltered_notransform_powell.tsv'))
+```
+
+```{r}
+covs <- c('bmi','sarcomere','FieldStrength')
+
+#Build the initial tb for all Powell sarc_positive individuals
+hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>%
+  select(HCR_IDs,age,sex=gender,bsa, all_of(covs), class_primary,
+         all_of(phenos_of_interest))
+
+hcmr_sarcpos_tb_noNAfiltered <- hcmr_sarcpos_tb_noNAfiltered %>%
+  select(HCR_IDs,age,sex=gender,bsa, all_of(covs), class_primary,
+         all_of(phenos_of_interest))
+
+#Only apply this filtering step to the hcmr_sarcpos_tb
+hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>%
+  filter(if_all(c(covs), negate(is.na))) %>%
+  filter(if_any(c(contphenos), negate(is.na))) #Filter out all individuals who have NA values for all continuous phenotypes or covariates
+
+print(str_glue('{nrow(hcmr_sarcpos_tb_noNAfiltered)} Powell sarcomere-positive individuals; {nrow(hcmr_sarcpos_tb)} after filtering for non-NA covariates/phenotypes.'))
+```
+
+This creates variations of the phenotype tibble for downstream analyses.
+
+```{r}
+hcmr_sarcpos_tb_notransform <- hcmr_sarcpos_tb #Non-transformed version of the tibble (but has been filtered for non-NA individuals)
+
+hcmr_sarcpos_tb_notransform_lgelogged <- hcmr_sarcpos_tb_notransform %>%
+  mutate(lge_total = log1p(lge_total)) #Log-transform LGE to correct for skewness (add a small constant to avoid log(0))
+
+#Log-transform the skewed LGE and also scale into SD
+scaled_cols <- c('lge_total')
+hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>%
+  mutate(across(scaled_cols, ~log1p(.))) %>% #Log-transform LGE to correct for skewness (add a small constant to avoid log(0))
+  mutate(across(contphenos, ~scale(.)[,1])) # Standard scaling of all endophenotypes
+
+write_tsv(hcmr_sarcpos_tb_notransform, str_c(output_data_dir, 'hcmr_sarcpos_pheno_rarevarclasses_notransform_powell.tsv'))
+write_tsv(hcmr_sarcpos_tb_notransform_lgelogged, str_c(output_data_dir, 'hcmr_sarcpos_pheno_rarevarclasses_notransform_lgelogged_powell.tsv'))
+write_tsv(hcmr_sarcpos_tb, str_c(output_data_dir, 'hcmr_sarcpos_pheno_rarevarclasses_transform_powell.tsv'))
+rm(hcmr_tb)
+```
+
+### Comparison Group Generator
+
+These generate the comparison_tbs for each comparison - either transformed or non-transformed and all for single-dosage individuals.
+
+N.B. comparison_pheno_tb_gen()'s single-dosage filter assumes the KT gene bins (MYBPC3_pLOF:FHOD3), so here it is called with only_singles=F and the single-dosage filter is applied using the Powell gene bins instead.
+
+```{r}
+#Single-dosage individuals = total dosage of 1 across all Powell gene bins
+powell_single_dosage_ids <- pergene_rarevar_classification %>%
+  mutate(total_dosage = rowSums(select(., -HCR_ID, -class), na.rm=T)) %>%
+  filter(total_dosage == 1) %>%
+  pull(HCR_ID)
+
+powell_comparison_pheno_tb_gen <- function(phenotype_tb, param_list){
+  comparison_pheno_tb_gen(phenotype_tb = phenotype_tb, param_list = param_list, rarevar_class_tb = pergene_rarevar_classification, var_class='primary', only_singles=F) %>%
+    filter(HCR_IDs %in% powell_single_dosage_ids)
+}
+```
+
+```{r}
+#This code generates the comparison lists
+#For thick vs. thin (excluding ACTC1 from Thin btw)
+thick_class <- unique(hcmr_sarcpos_tb$class_primary)[!str_detect(unique(hcmr_sarcpos_tb$class_primary),'ACTC1|TPM1|TNNI3|TNNT2') & str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3|MYH7|MYL2|MYL3')]
+thin_class <- unique(hcmr_sarcpos_tb$class_primary)[str_detect(unique(hcmr_sarcpos_tb$class_primary),'TPM1|TNNI3|TNNT2') & !str_detect(unique(hcmr_sarcpos_tb$class_primary),'ACTC1|MYBPC3|MYH7|MYL2|MYL3')]
+
+#For mybpc3_pLOF vs. mybpc3_nonlof
+mybpc3_plof_class <- unique(hcmr_sarcpos_tb$class_primary)[str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3_pLOF') & !str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3_nonLOF')]
+mybpc3_nonlof_class <- unique(hcmr_sarcpos_tb$class_primary)[str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3_nonLOF') & !str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3_pLOF')]
+
+#For mybpc3 vs. MYH7
+mybpc3_class <- unique(hcmr_sarcpos_tb$class_primary)[str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3') & !str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYH7')]
+myh7_class <- unique(hcmr_sarcpos_tb$class_primary)[str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYH7') & !str_detect(unique(hcmr_sarcpos_tb$class_primary),'MYBPC3')]
+
+#---------------------------------------------------------------------------------------
+#Parameter lists for each comparison
+param_lists <- list(
+  thick_thin_tb = list(thick_class, 'Thick',thin_class, 'Thin'),
+  mybpc3_plof_nonlof_tb = list(mybpc3_plof_class, 'MYBPC3_pLOF', mybpc3_nonlof_class, 'MYBPC3_nonLOF'),
+  mybc3_myh7_tb = list(mybpc3_class, 'MYBPC3',myh7_class,'MYH7')
+)
+
+rm(list=ls(pattern='class$'))
+```
+
+```{r}
+#These are with the transformed phenotype_tb
+comparison_tbs <- map(param_lists, ~powell_comparison_pheno_tb_gen(hcmr_sarcpos_tb, .))
+write_rds(comparison_tbs, str_c(output_data_dir, 'hcmr_comparison_tbs_powell.rds'))
+
+#These are with the nontransformed phenotype_tb (but without logged LGE)
+comparison_tbs_notransform <- map(param_lists, ~powell_comparison_pheno_tb_gen(hcmr_sarcpos_tb_notransform, .))
+write_rds(comparison_tbs_notransform, str_c(output_data_dir, 'hcmr_comparison_tbs_notransform_powell.rds'))
+
+#These are with the nontransformed phenotype_tb without filtering out the individuals with NA values for the continuous endophenotypes (but without LOG of LGE)
+comparison_tbs_noNAfiltered <- map(param_lists, ~powell_comparison_pheno_tb_gen(hcmr_sarcpos_tb_noNAfiltered, .))
+write_rds(comparison_tbs_noNAfiltered, str_c(output_data_dir, 'hcmr_comparison_tbs_noNAfiltered_powell.rds'))
+
+#Group counts per comparison
+map(comparison_tbs, ~count(., group))
+
+rm(param_lists)
+```
+
+## Linear/Logistic Regression Modelling
+
+I also fit linear/logistic regression models for the continuous/discrete traits to correct for confounding effects such as age, sex, BMI and BSA (where necessary e.g. fro maxLVWT).
+
+```{r}
+comparison_groups <- list(c('Thick','Thin'), c('MYBPC3_pLOF','MYBPC3_nonLOF'), c('MYBPC3','MYH7'))
+comporder <- c('Thick vs. Thin','MYBPC3 vs. MYH7','MYBPC3_pLOF vs. MYBPC3_nonLOF')
+lm_covars <- c('age','sex','bmi', 'FieldStrength')
+
+#Runs the linear regression for every comparison x continuous phenotype and builds the summary tibble
+lm_summary_builder <- function(comparison_tbs_list){
+  map2(comparison_tbs_list, comparison_groups, function(tb, grps){
+    map(continuous_param_list, ~linear_logistic_regression_modeller(tb, ., grps[1], grps[2], covars=lm_covars)) %>% bind_rows()
+  }) %>%
+    bind_rows() %>%
+    mutate(comparison = str_c(group1, ' vs. ', group2)) %>%
+    left_join(select(label_tb,Variable, Label),by=c('pheno'='Variable')) %>%
+    mutate(estimate = - estimate) %>% #Invert the estimate to reflect group1 vs. group2
+    select(-term) %>%
+    mutate(Label_short = case_when(
+      pheno == 'wallthkmax' ~ 'maxLVWT',
+      pheno == 'lvmassi' ~ 'LVMi',
+      pheno == 'lge_total' ~ 'LGE',
+      pheno == 'ecvfwhole' ~ 'ECVF',
+      pheno == 'lvef' ~ 'LVEF',
+      pheno == 'lvs_ellmean' ~ '-LongStrain',
+      pheno == 'lvs_eccmean' ~ '-CircStrain',
+      pheno == 'lvs_errmean' ~ 'RadStrain'
+    )) %>%
+    mutate(Label_short = str_c(Label_short, ' (', comparison,')'))
+}
+```
+
+```{r linlogreg}
+cont_lm_summary_tb <- lm_summary_builder(comparison_tbs)
+
+#Makes the label reflect the normalisation
+cont_lm_summary_tb <-  cont_lm_summary_tb %>%
+  mutate(Label= case_when(
+      pheno %in% scaled_cols ~ str_replace(Label, '\\([^ ]+\\)$', '(SD(Log(%)))'),
+      pheno %in% phenos_of_interest ~ str_replace(Label, '\\([^ ]+\\)$', '(SD)')))
+
+cont_lm_summary_tb <- colour_hardcoder(cont_lm_summary_tb)
+```
+
+This plots out the summary plot from the continuous phenotypes via linear regression - so adjusted for age/sex and BSA if necessary.
+
+```{r lm_summary, fig.width=9, fig.height=6}
+summary_plotter(cont_lm_summary_tb,output_path=str_c(output_plot_dir, '1_LM/'), mtc='fdr',confint=T, label=T, test='LinearRegression',xlabel='Coefficient Estimate', height=7, width=9, shape_values=c(15,16,17), comporder=comporder)
+
+write_tsv(cont_lm_summary_tb, str_c(output_plot_dir, '1_LM/cont_summary_tb.tsv'))
+
+#This is for publication
+summary_plotter(cont_lm_summary_tb,output_path=str_c(output_plot_dir, '1_LM/'), mtc='fdr',confint=T, poster=T, test='LinearRegression',xlabel='Coefficient Estimate', height=6, width=11, shape_values=c(15,16,17), comporder=comporder)
+```
+
+This outputs the summary plot as facetted forest plots instead with significance stars for multiple testing comparison.
+
+```{r}
+cont_lm_summary_tb_forest <- read_tsv(str_c(output_plot_dir, '1_LM/cont_summary_tb.tsv')) %>%
+  mutate(Label_short = str_match(Label_short, '(^[^()]+)')[,2]) %>%
+  select(-Label) %>%
+  dplyr::rename(Label = Label_short, predictor_label = comparison) %>%
+  mutate(adj_p = p.adjust(pval, method='BH'))  %>%
+  mutate(predictor_reported = predictor_label)
+
+summary_forest_plotter(cont_lm_summary_tb_forest, str_c(output_plot_dir, '1_LM/'), file_name = 'LinearRegression_summary_forestplot_fdr.png', sigphenos_only=F,facet_order=c('Thick vs. Thin','MYBPC3 vs. MYH7','MYBPC3_pLOF vs. MYBPC3_nonLOF'), height=9, width=6)
+```
+
+This outputs an alternative to the single combined scatter (volcano) summary plot: a 3-panel plot with one panel per genotypic comparison, sharing the same x-axis (standardised coefficient estimate) and y-axis (-log10 FDR-adjusted p-value) across all panels. Points are coloured by phenotype, filled if FDR-significant, with direction-of-effect annotated per panel.
+
+```{r lm_summary_panelplot, fig.width=10, fig.height=8}
+#summary_panel_plotter() is defined in genetic_subset_analysis/common/hcmr_endophenotype_functions.R
+summary_panel_plotter(read_tsv(str_c(output_plot_dir, '1_LM/cont_summary_tb.tsv')), output_path = str_c(output_plot_dir, '1_LM/'), comporder=comporder)
+```
+
+This also outputs the summary tibble but after running the linear regression without transformation (to enable extraction of coefficient values in native measurement units)
+
+```{r}
+cont_lm_summary_tb_notransform <- lm_summary_builder(comparison_tbs_notransform) %>%
+  colour_hardcoder()
+
+write_tsv(cont_lm_summary_tb_notransform, str_c(output_plot_dir, '1_LM/cont_summary_tb_notransform.tsv'))
+```
+
+I also need to check the assumptions of linear modelling to see which are valid models. These include
+
+- Linear relationship between predictor and outcome
+- Normally distributed residuals
+- Homoscedasticity (residuals have constant variance)
+- Independence of residuals
+
+From the diagnostic plots,  for good assumptions met, check for:
+
+1) Plot 1 (residuals vs. fitted) should be a horizontal line without patterns -> linearity relationship assumption OK
+2) Plot 2 (QQ) should have dots following the straight, dashed line -> normality of residuals assumption OK
+3) Plot 3 (Scale-Location) should have a horizontal line with equally spread points -> homoscedasticity
+4) Plot 4 (Residuals vs. Leverage) IDs influential points which might influence the regression fit
+  - Generally you would look for outliers with a magnitude of >3 (+3 or -3) standardised residuals (i.e outliers exceeding 3 standard deviations) and high-leverage points.
+  - A good high-leverage threshold is 2(p+1)/n where p is the number of predictors and n is the number of observations
+
+```{r lm_assumption_checker}
+comparison_names <- c('Thick vs. Thin','MYBPC3_pLOF vs. MYBPC3_nonLOF', 'MYBPC3 vs. MYH7')
+phenotype_names <- map_chr(continuous_param_list, ~.[[1]])
+
+lm_list <- map2(comparison_tbs, comparison_groups, function(tb, grps){
+  map(continuous_param_list, ~linear_logistic_regression_modeller(tb, ., grps[1], grps[2], covars=lm_covars, model_return=T))
+})
+
+#Naming all the lists and models
+names(lm_list) <- comparison_names
+for (i in seq(length(lm_list))){
+  names(lm_list[[i]]) <- phenotype_names
+}
+
+for (i in seq(length(lm_list))){
+  print(str_c('Diagnostic plots of linear regression for comparison ',names(lm_list)[i]))
+  walk2(lm_list[[i]], phenotype_names,~diagnostic_plotter(.x,.y))
+}
+```
+
+## Wilcoxon Rank Sum Test
+
+Now we generate comparison plots between the two groups of comparison for all MTC-significant signals from LM and simultaneously run a statistical test for that phenotype.
+
+Unlike the main analysis (where the phenotypes are hardcoded), the phenotypes tested per comparison are taken directly from the FDR-significant LM results.
+
+All NA values are filtered out and resulting counts per group are printed in the plot.
+
+```{r plot_test}
+mtc_sig_lm <- cont_lm_summary_tb %>%
+  mutate(adj_pval = p.adjust(pval, method='fdr')) %>%
+  filter(adj_pval < 0.05) %>%
+  select(-adj_pval)
+
+print(mtc_sig_lm$Label_short)
+
+#Run the pairwise Wilcoxon rank sum tests and distribution plotting for each MTC-significant comparison but on the non-transformed phenotypes
+wilcoxon_subdirs <- c('thick_thin','mybpc3_plof_nonlof','mybpc3_myh7')
+
+cont_wilcoxon_summary_tb <- pmap(list(comparison_tbs_notransform, comparison_groups, wilcoxon_subdirs), function(tb, grps, subdir){
+  sig_phenos <- mtc_sig_lm %>%
+    filter(group1 == grps[1], group2 == grps[2]) %>%
+    pull(pheno)
+  map(
+    continuous_param_list[names(continuous_param_list) %in% sig_phenos],
+    ~plot_tester(input_tb=tb, ., group1_name=grps[1], group2_name=grps[2], output_path=str_c(output_plot_dir, '2_Wilcoxon/', subdir))
+  ) %>%
+    bind_rows()
+}) %>%
+  bind_rows()
+
+cont_wilcoxon_summary_tb
+```
+
+## Supplementary: Raw Phenotype Distributions for Significant Findings
+
+This outputs a supplementary panelled figure of the raw (non-transformed, native units) phenotype distributions overlaid as histograms (density-scaled by default) across both subgroups, for every FDR-significant comparison x phenotype finding from the linear regression. One panel row per genotypic comparison; within each, one sub-panel per significant phenotype (free scales as units differ). Dashed lines show group medians; sub-panel titles give the phenotype label (with units).
+
+```{r sig_density_plot, fig.width=12, fig.height=12}
+#sig_density_plotter() is defined in genetic_subset_analysis/common/hcmr_endophenotype_functions.R
+#Significance taken from the standardised LM results; distributions plotted on raw (non-transformed, LGE not logged) values
+sig_density_plotter(
+  summary_tb = read_tsv(str_c(output_plot_dir, '1_LM/cont_summary_tb.tsv')),
+  comparison_tbs_list = read_rds(str_c(output_data_dir, 'hcmr_comparison_tbs_notransform_powell.rds')),
+  param_list = continuous_param_list,
+  output_path = str_c(output_plot_dir, '2_Wilcoxon/'),
+  comporder = comporder
+)
+```
+
+## Publication Figure: Panelled Summary Scatter + Raw Phenotype Distributions
+
+This combines the 3-panel summary scatter plot (top) with the raw phenotype histograms for significant findings (underneath) into a single publication figure. Panels are tagged sequentially (A = summary scatter; B onwards = one density row per comparison).
+
+```{r combined_publication_figure, fig.width=12, fig.height=20}
+#combined_figure_plotter() is defined in genetic_subset_analysis/common/hcmr_endophenotype_functions.R
+combined_figure_plotter(
+  summary_tb = read_tsv(str_c(output_plot_dir, '1_LM/cont_summary_tb.tsv')),
+  comparison_tbs_list = read_rds(str_c(output_data_dir, 'hcmr_comparison_tbs_notransform_powell.rds')),
+  param_list = continuous_param_list,
+  output_path = str_c(output_plot_dir, '1_LM/'),
+  comporder = comporder
+)
+```
+

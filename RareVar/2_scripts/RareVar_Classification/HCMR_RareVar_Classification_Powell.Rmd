@@ -1,0 +1,136 @@
+---
+title: "Preparation and Analysis of Rare Variant Classifications in HCMR - Powell"
+author: "Jonathan Chan"
+output: 
+  html_document:
+    code_folding: hide   
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+rm(list=ls())
+
+getwd()
+knitr::opts_knit$set(root.dir = "/gpfs3/well/PROCARDIS/jchan/hcmr_ukbb/")
+```
+
+
+# Sensitivity Variant Classification
+
+This performs variant classification using George Powell's variant classifications instead as a sensitivity analysis.
+
+```{r}
+getwd()
+#Import in the total_df_notransform from EDA_HCMR.Rmd
+total_df_notransform_nogenofilter <- readRDS('EDA/3_output/data/total_notransform_nogenofilter_df.rds') %>% #I use the 2750 -> filtered for those who have HCR IDs (2677) (i.e. without filtering for hard-called genotypes)
+  distinct()
+
+powell_variant_status <- read_tsv('genetic_subset_analysis/RareVar/1_input/powell_HCMR_variant_status.tsv')
+```
+
+This extracts, from each individual-level VEP .vcf, the variants which are 'SARC+' in Powell's SARC_variant_class and outputs:
+
+1) all_merged_overlapvars_tb_powell = one row per individual with Variant1; Consequence1; Curation1; dosage1; Variant2 etc. (analogous to all_merged_overlapvars_tb)
+2) all_merged_tb_powell = dosage per gene bin, with MYBPC3 split into MYBPC3_pLOF and MYBPC3_nonLOF (analogous to all_merged_tb)
+3) classified_hcrids_powell = all_merged_tb_powell + class label (analogous to classified_hcrids)
+
+Variants are matched on Powell's VariantID (CHROM:POS:REF:ALT, b38) against the lifted-over individual VEP .vcf files (both individual_vep/ and individual_vep/sarcneg/ so that individuals who were sarcomere-negative per KT but carry a Powell SARC+ variant are picked up).
+
+```{r powell_sensitivity_classification}
+powell_sarcpos_vars <- powell_variant_status %>%
+  filter(SARC_variant_class == 'SARC+') %>%
+  select(VariantID, Gene = SYMBOL, Transcript = Feature, Curation = SARC_variant_class)
+
+#VEP CSQ field names (as in hcmr_rarevar_classifier.R)
+vep_csq_colnames <- "Allele|Consequence|IMPACT|SYMBOL|Gene_ID|Feature_type|Feature|BIOTYPE|EXON|INTRON|HGVSc|HGVSp|cDNA_position|CDS_position|Protein_position|Amino_acids|Codons|Existing_variation|DISTANCE|STRAND|FLAGS|SYMBOL_SOURCE|HGNC_ID|CANONICAL|MANE_SELECT|MANE_PLUS_CLINICAL|HGVS_OFFSET|HGVSg|gnomADg_AF|gnomADg_AFR_AF|gnomADg_AMI_AF|gnomADg_AMR_AF|gnomADg_ASJ_AF|gnomADg_EAS_AF|gnomADg_FIN_AF|gnomADg_MID_AF|gnomADg_NFE_AF|gnomADg_OTH_AF|gnomADg_SAS_AF|MAX_AF|MAX_AF_POPS|CLIN_SIG|SOMATIC|PHENO|NMD|LoF|LoF_filter|LoF_flags|LoF_info" %>%
+  str_split('\\|') %>%
+  unlist()
+
+#Define function to read in an individual-level VEP .vcf and return the Powell SARC+ variants carried (dosage > 0)
+powell_vcf_extractor <- function(filepath){
+  vcf <- vroom::vroom(filepath, delim='\t', comment='##', col_types=cols(.default='c'), altrep=TRUE, progress=FALSE) #altrep = lazy so INFO only materialised for matched rows
+  hcr_id <- colnames(vcf)[10]
+
+  #Match on CHROM:POS:REF:ALT (removing chr prefix to match Powell's VariantID). Assumes biallelic records as per hcmr_rarevar_classifier.R
+  keep <- str_c(str_remove(vcf[[1]], '^chr'), vcf$POS, vcf$REF, vcf$ALT, sep=':') %in% powell_sarcpos_vars$VariantID
+  if (!any(keep)){
+    return(NULL)
+  }
+  vcf <- vcf[keep, c(1, 2, 4, 5, 8, 10)]
+  colnames(vcf) <- c('CHROM', 'POS', 'REF', 'ALT', 'INFO', 'GT')
+
+  vcf %>%
+    mutate(VariantID = str_c(str_remove(CHROM, '^chr'), POS, REF, ALT, sep=':'),
+           GT = str_extract(GT, '^[^:]+'),
+           dosage = case_when(str_detect(GT, '^(0[/|]1|1[/|]0)$') ~ 1,
+                              str_detect(GT, '^1[/|]1$') ~ 2,
+                              T ~ 0),
+           HCR_ID = hcr_id) %>%
+    filter(dosage != 0) %>%
+    left_join(powell_sarcpos_vars, by='VariantID') %>%
+    mutate(CSQ = str_extract(INFO, '(?<=CSQ=)[^;]+')) %>%
+    separate_rows(CSQ, sep=',') %>%
+    separate(CSQ, into=vep_csq_colnames, sep='\\|', fill='right', extra='drop') %>%
+    arrange(desc(str_detect(coalesce(Feature, ''), fixed(Transcript)))) %>% #Prioritise the CSQ entry for Powell's transcript
+    distinct(VariantID, .keep_all=TRUE) %>%
+    mutate(Variant = coalesce(str_c(Gene, ':', str_match(HGVSc, ':(.+$)')[,2]), VariantID)) %>% #Same Gene:c. format as KT_HCMR overlap variants
+    select(HCR_ID, SYMBOL=Gene, VariantID, Variant, Consequence, LoF, Curation, dosage)
+}
+
+#This looks at the 2630 HCMR individuals with rare variant data
+vep_filepaths <- list.files('genetic_subset_analysis/RareVar/3_output/individual_vep', pattern='^HCR.*\\.vcf$', full.names=TRUE, recursive=TRUE)
+
+powell_overlapvars_long <- map(vep_filepaths, powell_vcf_extractor, .progress=TRUE) %>%
+  bind_rows() 
+
+powell_overlapvars_long <- powell_overlapvars_long %>%
+  filter(HCR_ID %in% total_df_notransform_nogenofilter$HCR_IDs) %>%
+  distinct(HCR_ID, VariantID, .keep_all=TRUE) #In case an individual has a .vcf in both individual_vep/ and individual_vep/sarcneg/
+
+#Make all_merged_overlapvars_tb_powell have one row per individual and then many columns for Var1; Dosage1; Var2; Dosage 2 etc.
+powell_max_vars <- max(count(powell_overlapvars_long, HCR_ID)$n)
+
+all_merged_overlapvars_tb_powell <- powell_overlapvars_long %>%
+  group_by(HCR_ID) %>%
+  mutate(variant_number = row_number()) %>%
+  ungroup() %>%
+  select(HCR_ID, variant_number, VariantID, Variant, Consequence, Curation, dosage) %>%
+  pivot_wider(names_from = variant_number,
+              names_glue = "{.value}{variant_number}",
+              values_from = c(VariantID, Variant, Consequence, Curation, dosage)) %>%
+  select(HCR_ID, all_of(as.vector(outer(c('VariantID', 'Variant', 'Consequence', 'Curation', 'dosage'), seq_len(powell_max_vars), str_c))))
+
+#Dosage per gene bin, splitting MYBPC3 into pLOF (LOFTEE HC & not NMD-escaping stop_gained) vs nonLOF as per hcmr_rarevar_classifier.R
+powell_bins <- c('MYBPC3_pLOF', 'MYBPC3_nonLOF', sort(setdiff(unique(powell_sarcpos_vars$Gene), 'MYBPC3')))
+
+all_merged_tb_powell <- powell_overlapvars_long %>%
+  mutate(is_hc_lof = str_detect(coalesce(LoF, ''), 'HC'),
+         is_plof = is_hc_lof & (str_detect(Consequence, 'splice_acceptor_variant|splice_donor_variant|frameshift_variant') |
+                                  (str_detect(Consequence, 'stop_gained') & !str_detect(Consequence, 'NMD_escaping_variant'))),
+         bin = case_when(SYMBOL != 'MYBPC3' ~ SYMBOL,
+                         is_plof ~ 'MYBPC3_pLOF',
+                         T ~ 'MYBPC3_nonLOF')) %>%
+  group_by(HCR_ID, bin) %>%
+  summarise(dosage = sum(dosage), .groups='drop') %>%
+  mutate(bin = factor(bin, levels=powell_bins)) %>%
+  pivot_wider(names_from = bin, values_from = dosage, values_fill = 0, names_expand = TRUE) %>%
+  select(HCR_ID, all_of(powell_bins))
+
+#Class label = all gene bins with non-zero dosage, separated by '|' (as per rare_variant_classifier)
+classified_hcrids_powell <- all_merged_tb_powell
+classified_hcrids_powell$class <- apply(as.matrix(select(all_merged_tb_powell, -HCR_ID)) != 0, 1, function(x) str_c(powell_bins[x], collapse='|'))
+
+print(str_c('There are ', nrow(classified_hcrids_powell), ' HCR IDs who carry >=1 Powell SARC+ variant'))
+print(str_c('There are ', sum(str_detect(classified_hcrids_powell$class, '\\|')), ' HCR IDs who have multiple classes of variants'))
+
+classified_hcrids <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class.tsv') #Import enables comparison to KT classifications
+print(str_c(sum(classified_hcrids_powell$HCR_ID %in% classified_hcrids$HCR_ID), ' of these are also sarcomere-positive per KT; ',
+            sum(!classified_hcrids$HCR_ID %in% classified_hcrids_powell$HCR_ID), ' KT sarcomere-positive HCR IDs are not SARC+ per Powell'))
+
+rm(powell_sarcpos_vars, vep_csq_colnames, vep_filepaths, powell_max_vars, powell_bins)
+
+write_tsv(all_merged_overlapvars_tb_powell, 'genetic_subset_analysis/RareVar/3_output/individual_class/overlap_variants/hcmr_powell_overlapvariants.tsv')
+write_tsv(classified_hcrids_powell, 'genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class_powell.tsv')
+```
+

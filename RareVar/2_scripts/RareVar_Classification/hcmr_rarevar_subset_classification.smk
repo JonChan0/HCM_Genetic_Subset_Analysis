@@ -19,16 +19,16 @@ import pandas as pd
 ##Define your input variables here!!!!!!!!!!!!!!!!
 
 #For sarcomere-positive only
-mypath = '/well/PROCARDIS/jchan/hcmr_ukbb/hcmr_vcf/individual_sarcpos_vcfs/' #If focusing on only sarcomere-positive individuals
-pheno_geno_vcf_filenames_path= '/well/PROCARDIS/jchan/hcmr_ukbb/rarevar_subset_analysis/data/hcmr_sarc_pos_rarevar_vcf_hcrids_nogenofilter.tsv'
-output_subfolder =''
-sarcneg_indicator='FALSE'
+# mypath = '/well/PROCARDIS/jchan/hcmr_ukbb/hcmr_vcf/individual_sarcpos_vcfs/' #If focusing on only sarcomere-positive individuals
+# pheno_geno_vcf_filenames_path= 'well/PROCARDIS/jchan/hcmr_ukbb/genetic_subset_analysis/RareVar/1_input/hcmr_sarc_pos_rarevar_vcf_hcrids_nogenofilter.tsv'
+# output_subfolder =''
+# sarcneg_indicator='FALSE'
 
 #For sarcomere-negative only
-# mypath = '/well/PROCARDIS/jchan/hcmr_ukbb/hcmr_vcf/individual_sarcneg_vcfs/' #If focusing on only sarcomere-negative individuals
-# pheno_geno_vcf_filenames_path= '/well/PROCARDIS/jchan/hcmr_ukbb/rarevar_subset_analysis/data/hcmr_sarc_neg_rarevar_vcf_hcrids_nogenofilter.tsv'
-# output_subfolder='sarcneg/'
-# sarcneg_indicator='TRUE'
+mypath = '/well/PROCARDIS/jchan/hcmr_ukbb/hcmr_vcf/individual_sarcneg_vcfs/' #If focusing on only sarcomere-negative individuals
+pheno_geno_vcf_filenames_path= '/well/PROCARDIS/jchan/hcmr_ukbb/genetic_subset_analysis/RareVar/1_input/hcmr_sarc_neg_rarevar_vcf_hcrids_nogenofilter.tsv'
+output_subfolder='sarcneg/'
+sarcneg_indicator='TRUE'
 
 
 ids = [f for f in listdir(mypath) if isfile(join(mypath, f))] #Grabs out all files in mypath
@@ -44,19 +44,20 @@ id = [x for x in id_nonfiltered if x in pheno_genos] #Only defines ID if it is p
 
 rule all:
     input:
-        '../output/hcmr_pheno_recalibrated_vep_b38.vcf.gz',
-        '../output/hcmr_pheno_recalibrated_vep_b38.vcf.gz.tbi'
-        ,
-        expand('../output/individual_vep/'+output_subfolder+'{id}.vcf',id=id),
-        expand('../output/individual_class/'+output_subfolder+'{id}_class.tsv', id=id),
-        expand('../output/individual_class/'+output_subfolder+'{id}_class2.tsv', id=id),
-        expand('../output/individual_class/'+output_subfolder+'overlap_variants_{id}_class.tsv', id=id)
+        '../3_output/hcmr_pheno_recalibrated_vep_b38.vcf.gz',
+        '../3_output/hcmr_pheno_recalibrated_vep_b38.vcf.gz.tbi'
+        # ,
+        # expand('../3_output/individual_vep/'+output_subfolder+'{id}.vcf',id=id)
+        # ,
+        # expand('../3_output/individual_class/'+output_subfolder+'{id}_class.tsv', id=id),
+        # expand('../3_output/individual_class/'+output_subfolder+'{id}_class2.tsv', id=id),
+        # expand('../3_output/individual_class/'+output_subfolder+'overlap_variants_{id}_class.tsv', id=id)
 
 rule liftover:
     input: 
         vcf_input='/well/PROCARDIS/jchan/hcmr_ukbb/hcmr_vcf/hcmr_pheno_nogenofilter_recalibrated.vcf.gz'
     output:
-        vcf_output='../output/hcmr_pheno_recalibrated_b38.vcf.gz'
+        vcf_output='../3_output/hcmr_pheno_recalibrated_b38.vcf.gz'
     params:
         chain_filepath="/gpfs3/well/PROCARDIS/jchan/bin/liftover/hg19ToHg38.over.chain.gz",
         b38_fasta="/gpfs3/well/PROCARDIS/jchan/bin/liftover/hg38.fa"
@@ -68,7 +69,7 @@ rule liftover:
 
 rule joint_vep:
     input: rules.liftover.output.vcf_output
-    output: '../output/hcmr_pheno_recalibrated_vep_b38.vcf'
+    output: '../3_output/hcmr_pheno_recalibrated_vep_b38.vcf'
     conda:
         "vep110"
     resources:
@@ -83,8 +84,8 @@ rule joint_vep:
 rule bgzip_tabix_vep:
     input:rules.joint_vep.output
     output:
-        bgzip_output='../output/hcmr_pheno_recalibrated_vep_b38.vcf.gz',
-        tabix_output='../output/hcmr_pheno_recalibrated_vep_b38.vcf.gz.tbi'
+        bgzip_output='../3_output/hcmr_pheno_recalibrated_vep_b38.vcf.gz',
+        tabix_output='../3_output/hcmr_pheno_recalibrated_vep_b38.vcf.gz.tbi'
     conda:
         "gms"
     resources:
@@ -98,7 +99,7 @@ rule split_vep: #Only splits out those which are in the pheno_geno_vcf_filenames
     input: 
         vep_bgz = rules.bgzip_tabix_vep.output.bgzip_output
     output: 
-        vep_output_folder=directory('../output/individual_vep/'+output_subfolder)
+        vep_output_folder=directory('../3_output/individual_vep/'+output_subfolder)
     params:
         hcrids=pheno_geno_vcf_filenames_path
     conda:
@@ -110,21 +111,21 @@ rule split_vep: #Only splits out those which are in the pheno_geno_vcf_filenames
     '''
 
 #NEED TO RUN THE FIRST 3 RULES FIRST BECAUSE OF ISSUE WITH INPUT NOT MATCHING WELL!
-rule rscript_analysis:
-    input: 
-        accessory_input = rules.split_vep.output.vep_output_folder,
-        main_input='../output/individual_vep/'+output_subfolder+'{id}.vcf'
-    output: 
-        class_file='../output/individual_class/'+output_subfolder+'{id}_class.tsv',
-        class2_file='../output/individual_class/'+output_subfolder+'{id}_class2.tsv',
-        overlap_variants_file='../output/individual_class/'+output_subfolder+'overlap_variants_{id}_class.tsv'
-    conda:
-        "gms"
-    resources:
-        mem_mb=16000
-    params:
-        kt_acmg_classifications='../data/HCMR_final_AH_150319_completevarlist.csv',
-        sarcneg=sarcneg_indicator
-    shell:'''
-        Rscript hcmr_rarevar_classifier.R {input.main_input} {output.class_file} {output.class2_file} {output.overlap_variants_file} {params.kt_acmg_classifications} {params.sarcneg}
-    '''
+# rule rscript_analysis:
+#     input: 
+#         accessory_input = rules.split_vep.output.vep_output_folder,
+#         main_input='../3_output/individual_vep/'+output_subfolder+'{id}.vcf'
+#     output: 
+#         class_file='../3_output/individual_class/'+output_subfolder+'{id}_class.tsv',
+#         class2_file='../3_output/individual_class/'+output_subfolder+'{id}_class2.tsv',
+#         overlap_variants_file='../3_output/individual_class/'+output_subfolder+'overlap_variants_{id}_class.tsv'
+#     conda:
+#         "gms"
+#     resources:
+#         mem_mb=16000
+#     params:
+#         kt_acmg_classifications='../data/HCMR_final_AH_150319_completevarlist.csv',
+#         sarcneg=sarcneg_indicator
+#     shell:'''
+#         Rscript hcmr_rarevar_classifier.R {input.main_input} {output.class_file} {output.class2_file} {output.overlap_variants_file} {params.kt_acmg_classifications} {params.sarcneg}
+#     '''
