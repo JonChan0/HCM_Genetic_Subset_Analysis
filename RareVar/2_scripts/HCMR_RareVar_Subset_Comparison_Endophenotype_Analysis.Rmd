@@ -288,6 +288,16 @@ cont_lm_summary_tb <- read_tsv('genetic_subset_analysis/RareVar/3_output/plots/1
 summary_forest_plotter(cont_lm_summary_tb, 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/', file_name = 'LinearRegression_summary_forestplot_fdr.png', sigphenos_only=F,facet_order=c(c('Thick vs. Thin','MYBPC3 vs. MYH7','MYBPC3_pLOF vs. MYBPC3_nonLOF','P/LP vs. VUS')), height=9, width=6)
 ```
 
+This outputs an alternative to the single combined scatter (volcano) summary plot: a 4-panel plot with one panel per genotypic comparison, sharing the same x-axis (standardised coefficient estimate) and y-axis (-log10 FDR-adjusted p-value) across all panels. Points are coloured by phenotype, filled if FDR-significant, with direction-of-effect annotated per panel.
+
+```{r lm_summary_panelplot, fig.width=10, fig.height=8}
+#summary_panel_plotter() is defined in genetic_subset_analysis/common/hcmr_endophenotype_functions.R
+#Re-read the summary tibble as cont_lm_summary_tb is modified in the forest plot chunk above
+cont_lm_summary_tb_panel <- read_tsv('genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/cont_summary_tb.tsv')
+
+summary_panel_plotter(cont_lm_summary_tb_panel, output_path = 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/')
+```
+
 This also outputs the summary tibble but after running the linear regression without transformation (to enable extraction of coefficient values in native measurement units except for LGE which is logged)
 
 ```{r}
@@ -399,5 +409,36 @@ cont_wilcoxon_summary_tb <- thick_vs_thin_cont_results %>%
   bind_rows(plp_vs_vusfpvus_cont_results)
 
 rm(thick_vs_thin_cont_results,mybpc3_vs_myh7_cont_results,plp_vs_vusfpvus_cont_results)
+```
+
+## Supplementary: Raw Phenotype Distributions for Significant Findings
+
+This outputs a supplementary panelled figure of the raw (non-transformed, native units) phenotype distributions overlaid as histograms (density-scaled by default) across both subgroups, for every FDR-significant comparison x phenotype finding from the linear regression. One panel row per genotypic comparison; within each, one sub-panel per significant phenotype (free scales as units differ). Dashed lines show group medians; sub-panel titles give the phenotype label (with units).
+
+```{r sig_density_plot, fig.width=12, fig.height=12}
+#sig_density_plotter() is defined in genetic_subset_analysis/common/hcmr_endophenotype_functions.R
+#Significance taken from the standardised LM results; distributions plotted on raw (non-transformed, LGE not logged) values
+cont_lm_summary_tb_density <- read_tsv('genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/cont_summary_tb.tsv')
+
+sig_density_plotter(
+  summary_tb = cont_lm_summary_tb_density,
+  comparison_tbs_list = read_rds('genetic_subset_analysis/RareVar/3_output/data/hcmr_comparison_tbs_notransform.rds'), #Re-read from disk as the PathoSubset Rmd overwrites comparison_tbs_notransform with a nested P_LP/VUS list
+  param_list = continuous_param_list,
+  output_path = 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/2_Wilcoxon/'
+)
+```
+
+## Publication Figure: Panelled Summary Scatter + Raw Phenotype Distributions
+
+This combines the 4-panel summary scatter plot (top) with the raw phenotype histograms for significant findings (underneath) into a single publication figure. Panels are tagged sequentially (A = summary scatter; B onwards = one density row per comparison).
+
+```{r combined_publication_figure, fig.width=12, fig.height=20}
+#combined_figure_plotter() is defined in genetic_subset_analysis/common/hcmr_endophenotype_functions.R
+combined_figure_plotter(
+  summary_tb = read_tsv('genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/cont_summary_tb.tsv'),
+  comparison_tbs_list = read_rds('genetic_subset_analysis/RareVar/3_output/data/hcmr_comparison_tbs_notransform.rds'), #Re-read from disk (see density chunk above)
+  param_list = continuous_param_list,
+  output_path = 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/'
+)
 ```
 

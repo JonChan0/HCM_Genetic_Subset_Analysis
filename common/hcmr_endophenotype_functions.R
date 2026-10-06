@@ -1216,3 +1216,415 @@ meta_cont_from_tb <- function(
 
   return(meta_cont_result)
 }
+
+#------------------------------------------------------------------------------------------------
+#Publication summary figures for the rare variant subset comparisons
+
+#This plots a panelled summary scatter (volcano) plot with one panel per genotypic comparison,
+#sharing the same x-axis (coefficient estimate) and y-axis (-log10 adjusted p-value) across all panels
+summary_panel_plotter <- function(
+  input_tb,
+  output_path,
+  file_name = 'LinearRegression_summary_panelplot_fdr.png',
+  comporder = c(
+    'Thick vs. Thin',
+    'MYBPC3 vs. MYH7',
+    'MYBPC3_pLOF vs. MYBPC3_nonLOF',
+    'P/LP vs. VUS'
+  ),
+  mtc = 'fdr',
+  alpha = 0.05,
+  confint = TRUE,
+  xlabel = 'Coefficient Estimate (SD)',
+  width = 10,
+  height = 8,
+  legend_position = 'bottom' #'bottom' for standalone; 'right' when combined with the phenotype distributions
+) {
+  #MTC is applied across all comparisons x phenotypes (consistent with summary_plotter)
+  plot_tb <- input_tb %>%
+    mutate(
+      adj_p = p.adjust(pval, method = mtc),
+      sig = adj_p < alpha,
+      lowerCI = estimate - 1.96 * SE,
+      upperCI = estimate + 1.96 * SE,
+      pheno_short = str_trim(str_match(Label_short, '(^[^()]+)')[, 2]),
+      comparison = factor(str_c(group1, ' vs. ', group2), levels = comporder)
+    )
+
+  #Symmetric shared x-axis so direction of effect is visually comparable across panels
+  x_lim <- max(
+    abs(c(plot_tb$lowerCI, plot_tb$upperCI, plot_tb$estimate)),
+    na.rm = TRUE
+  ) *
+    1.05
+  y_data_max <- max(-log10(plot_tb$adj_p), -log10(alpha), na.rm = TRUE)
+  y_max <- y_data_max * 1.35 #Headroom so the 'Higher in...' text sits clear of the points and their labels
+  y_min <- -0.05 * y_max #Small negative buffer so points at adj_p ~ 1 aren't clipped at the bottom
+
+  #Per-panel direction-of-effect annotation (estimate > 0 means higher in group1)
+  direction_tb <- plot_tb %>%
+    distinct(comparison, group1, group2) %>%
+    mutate(
+      left_label = str_c('← Higher in ', group2),
+      right_label = str_c('Higher in ', group1, ' →')
+    )
+
+  #Consistent phenotype colours from colour_hardcoder()
+  colour_map <- plot_tb %>%
+    distinct(pheno_short, colour) %>%
+    drop_na()
+
+  panel_plot <- ggplot(
+    plot_tb,
+    aes(x = estimate, y = -log10(adj_p), colour = pheno_short)
+  ) +
+    geom_vline(xintercept = 0, linetype = 'dashed', colour = 'grey50') +
+    geom_hline(yintercept = -log10(alpha), linetype = 'dotted', colour = 'red') +
+    {
+      if (isTRUE(confint)) {
+        geom_linerange(
+          aes(xmin = lowerCI, xmax = upperCI),
+          alpha = 0.4,
+          linewidth = 0.6
+        )
+      }
+    } +
+    geom_point(aes(shape = sig), size = 2.8, stroke = 1) +
+    ggrepel::geom_text_repel(
+      data = filter(plot_tb, sig),
+      aes(label = pheno_short),
+      size = 3.5,
+      show.legend = FALSE,
+      min.segment.length = 0,
+      box.padding = 0.4,
+      ylim = c(NA, y_data_max * 1.15) #Keep repelled labels below the 'Higher in...' text
+    ) +
+    geom_text(
+      data = direction_tb,
+      aes(x = -x_lim, y = y_max, label = left_label),
+      inherit.aes = FALSE,
+      hjust = 0,
+      vjust = 1,
+      size = 3.2,
+      colour = 'grey30'
+    ) +
+    geom_text(
+      data = direction_tb,
+      aes(x = x_lim, y = y_max, label = right_label),
+      inherit.aes = FALSE,
+      hjust = 1,
+      vjust = 1,
+      size = 3.2,
+      colour = 'grey30'
+    ) +
+    facet_wrap(~comparison, nrow = 2, drop = FALSE) + #Fixed (shared) x and y scales across panels
+    scale_colour_manual(
+      values = set_names(colour_map$colour, colour_map$pheno_short)
+    ) +
+    scale_shape_manual(
+      values = c(`TRUE` = 16, `FALSE` = 1),
+      labels = c(
+        `TRUE` = paste0('FDR < ', alpha),
+        `FALSE` = paste0('FDR ≥ ', alpha)
+      )
+    ) +
+    scale_x_continuous(limits = c(-x_lim, x_lim), n.breaks = 8) +
+    scale_y_continuous(
+      limits = c(y_min, y_max),
+      breaks = function(l) {
+        b <- scales::breaks_pretty()(c(0, y_data_max))
+        b[b >= 0]
+      }, #No ticks/breaks in the negative buffer or the text headroom
+      expand = expansion(mult = c(0, 0.02))
+    ) +
+    labs(
+      x = xlabel,
+      y = '-log10(FDR-adjusted p-value)',
+      colour = 'Phenotype',
+      shape = NULL
+    ) +
+    theme_classic(base_size = 14) +
+    theme(
+      strip.background = element_rect(fill = 'grey92'),
+      strip.text = element_text(face = 'bold'),
+      panel.grid.minor = element_blank(),
+      legend.position = legend_position,
+      legend.box = 'vertical'
+    ) +
+    {
+      #Two-row legend when at the bottom; single column when at the side
+      if (legend_position %in% c('bottom', 'top')) {
+        guides(
+          colour = guide_legend(nrow = 2, override.aes = list(shape = 16))
+        )
+      } else {
+        guides(
+          colour = guide_legend(ncol = 1, override.aes = list(shape = 16))
+        )
+      }
+    }
+
+  ggsave(
+    file.path(output_path, file_name),
+    panel_plot,
+    width = width,
+    height = height,
+    dpi = 300
+  )
+
+  return(panel_plot)
+}
+
+#This plots the raw (non-transformed) phenotype distributions as overlapping histograms across both subgroups
+#for every significant comparison x phenotype finding; one row per comparison, one sub-panel per phenotype
+sig_density_plotter <- function(
+  summary_tb,
+  comparison_tbs_list, #List of comparison tibbles each with a `group` factor (levels = c(group2, group1))
+  param_list,
+  output_path,
+  file_name = 'Significant_findings_raw_histogram_panelplot.png',
+  comporder = c(
+    'Thick vs. Thin',
+    'MYBPC3 vs. MYH7',
+    'MYBPC3_pLOF vs. MYBPC3_nonLOF',
+    'P/LP vs. VUS'
+  ),
+  mtc = 'fdr',
+  alpha = 0.05,
+  palette = list(
+    #Distinct (group1, group2) colour pair per comparison
+    'Thick vs. Thin' = c('#1B9E77', '#D95F02'),
+    'MYBPC3 vs. MYH7' = c('#7570B3', '#E6AB02'),
+    'MYBPC3_pLOF vs. MYBPC3_nonLOF' = c('#E7298A', '#66A61E'),
+    'P/LP vs. VUS' = c('#2166AC', '#B2182B')
+  ),
+  default_palette = c('grey30', 'grey70'),
+  bins = 30,
+  hist_scale = c('density', 'count'), #'density' = each group's histogram integrates to 1; 'count' = raw counts
+  width = 12,
+  height = NULL
+) {
+  hist_scale <- match.arg(hist_scale)
+
+  #Significant comparison x phenotype pairs (MTC across all tests, consistent with summary_plotter)
+  sig_tb <- summary_tb %>%
+    mutate(adj_p = p.adjust(pval, method = mtc)) %>%
+    filter(adj_p < alpha) %>%
+    mutate(comparison = str_c(group1, ' vs. ', group2)) #Built from group1/group2 to match the label rebuilt from the comparison_tbs below
+
+  if (nrow(sig_tb) == 0) {
+    message(
+      'No significant findings at the chosen threshold; no density plot produced.'
+    )
+    return(invisible(NULL))
+  }
+
+  sig_phenos <- unique(sig_tb$pheno)
+
+  #Raw values in long format; comparison label rebuilt from group factor levels (levels = c(group2, group1))
+  raw_long <- map_dfr(comparison_tbs_list, function(tb) {
+    lv <- levels(tb$group)
+    tb %>%
+      mutate(
+        group = as.character(group),
+        comparison = str_c(lv[2], ' vs. ', lv[1])
+      ) %>%
+      select(HCR_IDs, group, comparison, any_of(sig_phenos)) %>%
+      pivot_longer(any_of(sig_phenos), names_to = 'pheno', values_to = 'value')
+  }) %>%
+    filter(!is.na(value)) %>%
+    semi_join(sig_tb, by = c('comparison', 'pheno'))
+
+  #Sub-panel titles: native-unit phenotype label only
+  facet_tb <- sig_tb %>%
+    mutate(
+      facet_label = str_wrap(
+        map_chr(pheno, ~ param_list[[.x]][2]),
+        35
+      )
+    ) %>%
+    select(comparison, pheno, group1, group2, facet_label)
+
+  comps_present <- intersect(comporder, unique(sig_tb$comparison))
+
+  comp_plots <- map(comps_present, function(comp) {
+    comp_facets <- filter(facet_tb, comparison == comp)
+    g1 <- comp_facets$group1[1]
+    g2 <- comp_facets$group2[1]
+    comp_palette <- if (!is.null(palette[[comp]])) {
+      palette[[comp]]
+    } else {
+      default_palette
+    }
+    group_cols <- set_names(comp_palette, c(g1, g2))
+
+    comp_tb <- raw_long %>%
+      filter(comparison == comp) %>%
+      left_join(
+        select(comp_facets, comparison, pheno, facet_label),
+        by = c('comparison', 'pheno')
+      ) %>%
+      mutate(group = factor(group, levels = c(g1, g2)))
+
+    median_tb <- comp_tb %>%
+      group_by(facet_label, group) %>%
+      summarise(med = median(value), .groups = 'drop')
+
+    ggplot(comp_tb, aes(x = value, fill = group, colour = group)) +
+      {
+        #Overlapping histograms; density-scaled by default so groups of very different size remain comparable
+        if (hist_scale == 'density') {
+          geom_histogram(
+            aes(y = after_stat(density)),
+            position = 'identity',
+            bins = bins,
+            alpha = 0.4,
+            linewidth = 0.3
+          )
+        } else {
+          geom_histogram(
+            position = 'identity',
+            bins = bins,
+            alpha = 0.4,
+            linewidth = 0.3
+          )
+        }
+      } +
+      geom_vline(
+        data = median_tb,
+        aes(xintercept = med, colour = group),
+        linetype = 'dashed',
+        linewidth = 0.7
+      ) +
+      facet_wrap(~facet_label, scales = 'free', nrow = 1) +
+      scale_fill_manual(values = group_cols) +
+      scale_colour_manual(values = group_cols) +
+      labs(
+        title = comp,
+        x = 'Raw phenotype value',
+        y = ifelse(hist_scale == 'density', 'Density', 'Count'),
+        fill = NULL,
+        colour = NULL
+      ) +
+      theme_classic(base_size = 12) +
+      theme(
+        plot.title = element_text(face = 'bold'),
+        strip.background = element_blank(), #Plain text phenotype label, no box
+        strip.text = element_text(size = 10, face = 'bold'),
+        panel.grid.minor = element_blank(),
+        legend.position = 'right'
+      )
+  })
+
+  combined_plot <- patchwork::wrap_plots(comp_plots, ncol = 1) +
+    patchwork::plot_annotation(tag_levels = 'A')
+
+  if (is.null(height)) {
+    height <- 3.8 * length(comp_plots)
+  }
+
+  ggsave(
+    file.path(output_path, file_name),
+    combined_plot,
+    width = width,
+    height = height,
+    dpi = 300
+  )
+
+  return(combined_plot)
+}
+
+#This combines the panelled summary scatter (top) with the raw phenotype histograms for significant findings (underneath)
+#into a single publication figure. Panels are tagged sequentially (A = summary scatter; B onwards = one row per comparison)
+combined_figure_plotter <- function(
+  summary_tb,
+  comparison_tbs_list,
+  param_list,
+  output_path,
+  file_name = 'LinearRegression_summary_panelplot_with_histograms.png',
+  scatter_file_name = 'LinearRegression_summary_panelplot_fdr_legendright.png',
+  density_file_name = 'Significant_findings_raw_histogram_panelplot.png',
+  comporder = c(
+    'Thick vs. Thin',
+    'MYBPC3 vs. MYH7',
+    'MYBPC3_pLOF vs. MYBPC3_nonLOF',
+    'P/LP vs. VUS'
+  ),
+  palette = NULL, #NULL uses sig_density_plotter()'s default per-comparison palette
+  mtc = 'fdr',
+  alpha = 0.05,
+  scatter_height = 8, #Height (in) allotted to the summary scatter
+  density_row_height = 3.8, #Height (in) allotted to each density row
+  width = 12
+) {
+  #Summary scatter with legend on the right (saved under a separate name so the bottom-legend standalone PNG isn't overwritten)
+  scatter_plot <- summary_panel_plotter(
+    summary_tb,
+    output_path = output_path,
+    file_name = scatter_file_name,
+    comporder = comporder,
+    mtc = mtc,
+    alpha = alpha,
+    legend_position = 'right'
+  )
+
+  #Histogram rows for significant findings (re-saves its own standalone PNG as a side effect)
+  density_args <- list(
+    summary_tb = summary_tb,
+    comparison_tbs_list = comparison_tbs_list,
+    param_list = param_list,
+    output_path = output_path,
+    file_name = density_file_name,
+    comporder = comporder,
+    mtc = mtc,
+    alpha = alpha
+  )
+  if (!is.null(palette)) {
+    density_args$palette <- palette
+  }
+  density_plot <- do.call(sig_density_plotter, density_args)
+
+  if (is.null(density_plot)) {
+    message(
+      'No significant findings; combined figure contains the summary scatter only.'
+    )
+    ggsave(
+      file.path(output_path, file_name),
+      scatter_plot,
+      width = width,
+      height = scatter_height,
+      dpi = 300
+    )
+    return(scatter_plot)
+  }
+
+  #Number of histogram rows = number of comparisons (in comporder) with >=1 significant finding (same MTC as the plotters)
+  n_density_rows <- summary_tb %>%
+    mutate(adj_p = p.adjust(pval, method = mtc)) %>%
+    filter(adj_p < alpha) %>%
+    mutate(comparison = str_c(group1, ' vs. ', group2)) %>%
+    filter(comparison %in% comporder) %>%
+    distinct(comparison) %>%
+    nrow()
+
+  #Nested patchwork tags continue sequentially: A = scatter, B.. = histogram rows
+  combined_plot <- patchwork::wrap_plots(
+    scatter_plot,
+    density_plot,
+    ncol = 1,
+    heights = c(scatter_height, density_row_height * n_density_rows)
+  ) +
+    patchwork::plot_annotation(tag_levels = 'A') &
+    theme(plot.tag = element_text(face = 'bold', size = 16))
+
+  ggsave(
+    file.path(output_path, file_name),
+    combined_plot,
+    width = width,
+    height = scatter_height + density_row_height * n_density_rows,
+    dpi = 300,
+    limitsize = FALSE
+  )
+
+  return(combined_plot)
+}
