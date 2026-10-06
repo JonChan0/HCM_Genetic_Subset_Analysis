@@ -79,7 +79,7 @@ hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>%
 hcmr_sarcpos_tb_notransform <- hcmr_sarcpos_tb
 hcmr_sarcpos_tb <- inverse_rank_transformer(hcmr_sarcpos_tb, contphenos) # Rank-based inverse normalisation of all endophenotypes
 
-rm(hcmr_tb)
+#hcmr_tb is kept as it is used in the Revision of Pathogenicity-Based Comparison Approach section
 ```
 
 ```{r}
@@ -264,7 +264,8 @@ write_csv(filter(phenotype_tb_multidosage, HCR_ID %in% homozygotes_plp$HCR_ID), 
 write_csv(filter(phenotype_tb_multidosage, HCR_ID %in% multi_het_plp$HCR_ID), 'genetic_subset_analysis/RareVar/3_output/summary_tbs/compoundhet_plp_cmrpheno.csv')
 
 ```
-## Revision of Pathogenicity-Based Comparison Approach
+
+## Sensitivity Analysis: Revision of Pathogenicity-Based Comparison Approach
 
 I compare the CMR phenotypes across the 3x groups of 
 1) Sarcomere-positive P/LP
@@ -302,9 +303,11 @@ filenames <- list.files(basepath, pattern='_class.tsv')
 class_dosage_list <- map(str_c(basepath,filenames,sep='/'), tsv_importer_overlapvars)
 
 all_merged_overlapvars_tb_sarcneg <- bind_rows(class_dosage_list)
+first_index <- min(which(str_detect(colnames(all_merged_overlapvars_tb_sarcneg),'HCR'))) #First column index with HCR in the column name (columns 5 onwards also include NMD/LoF annotation columns)
 all_merged_overlapvars_tb_sarcneg <- all_merged_overlapvars_tb_sarcneg %>%
-    pivot_longer(5:ncol(all_merged_overlapvars_tb_sarcneg),names_to='HCR_ID',values_to='dosage') %>%
+    pivot_longer(first_index:ncol(all_merged_overlapvars_tb_sarcneg),names_to='HCR_ID',values_to='dosage') %>%
   filter(!is.na(dosage))
+rm(first_index)
 
 #Make all merged overlapvars_tb have one row per individual and then many columns for Var1; Dosage1; Var2; Dosage 2 etc.
 # Add a column for rare variant number
@@ -313,7 +316,8 @@ all_merged_overlapvars_tb_sarcneg$variant_number <- ave(rep(1, nrow(all_merged_o
 # Pivot the tibble wider
 all_merged_overlapvars_tb_sarcneg <- all_merged_overlapvars_tb_sarcneg  %>%
   select(-SYMBOL) %>%
-  pivot_wider(names_from = variant_number, 
+  pivot_wider(id_cols = HCR_ID, #One row per individual (otherwise NMD/LoF columns split multi-variant individuals across rows)
+              names_from = variant_number,
               names_glue = "{.value}{variant_number}",
               values_from = c(Variant, Consequence, Curation, dosage)) %>%
   select(HCR_ID, ends_with('1'), ends_with('2'), ends_with('3'))
@@ -394,13 +398,29 @@ sarc_neg_total_df_notransform <- sarc_neg_total_df_notransform %>%
   select(HCR_IDs,age,sex=gender,bsa,
          wallthkmax, lvmassi, lge_total, ecvfwhole, lvef, lvs_ellmean, lvs_eccmean, lvs_errmean, Morphology) #Define your phenotypes of interest here
 
+#No inverse rank transformation here - lge_total is transformed after combining with the sarcomere-positive individuals (so both groups are on the same scale)
 phenotype_tb2_sarcneg <- pheno_tb_builder(pergene_rarevar_classification2_sarcneg, sarc_neg_total_df_notransform)%>% #This is with the per-gene rare variant dosage broken down to P/LP or VUS as well (so the secondary analysis)
-  #log_transformer('lvmassi') %>%
-  inverse_rank_transformer(c('lge_total'#,'ecvfwhole'
-                             ))%>% #Filter out all individuals who have NA values for all 6 continuous phenotypes
-  filter(if_any(c(wallthkmax, lvmassi, lge_total, ecvfwhole, lvef, lvs_ellmean, lvs_eccmean, lvs_errmean), negate(is.na)))
+  filter(if_any(c(wallthkmax, lvmassi, lge_total, ecvfwhole, lvef, lvs_ellmean, lvs_eccmean, lvs_errmean), negate(is.na))) #Filter out all individuals who have NA values for all continuous phenotypes
 
 rm(alltbs_sarcneg)
+
+#Repeat for the sarcomere-positive individuals using the P/LP vs. VUS_FP/VUS classification (i.e phenotype_tb2)
+sarc_pos_total_df_notransform <- hcmr_tb %>%
+  filter(sarcomere==1) %>%
+  select(HCR_IDs,age,sex=gender,bsa,
+         wallthkmax, lvmassi, lge_total, ecvfwhole, lvef, lvs_ellmean, lvs_eccmean, lvs_errmean, Morphology)
+
+phenotype_tb2 <- pheno_tb_builder(pergene_perpatho_rarevar_classification, sarc_pos_total_df_notransform) %>%
+  filter(if_any(c(wallthkmax, lvmassi, lge_total, ecvfwhole, lvef, lvs_ellmean, lvs_eccmean, lvs_errmean), negate(is.na)))
+
+#Sarcomere-positive individuals with >1 dosage of a rare variant (homozygotes or multiple heterozygotes) from the KT overlap variants
+all_merged_overlapvars_tb <- read_tsv('genetic_subset_analysis/RareVar/3_output/individual_class/overlap_variants/hcmr_KT_overlapvariants.tsv', show_col_types=F)
+multi_dosage_ids <- all_merged_overlapvars_tb %>%
+  filter(dosage1==2 | !is.na(dosage2)) %>%
+  pull(HCR_ID) %>%
+  unique()
+
+rm(sarc_pos_total_df_notransform, all_merged_overlapvars_tb)
 
 ```
 Then I combine into a single tb for comparison with the 'sarcomere-positive' P/LP and VUS individuals.
@@ -411,8 +431,14 @@ phenotype_tb_sarcpos_sarcneg <- bind_rows(mutate(phenotype_tb2_sarcneg, Morpholo
                                           mutate(phenotype_tb2, Morphology=as.character(Morphology))%>% filter(!HCR_ID %in% multi_dosage_ids)) %>% #Also filters out multiple-dosage individuals from phenotype_tb
   mutate(group=case_when(str_detect(class,'P_LP')~ 'P/LP',
                          str_detect(class, 'VUS_FP')~ 'VUS_Sarc+',
-                         str_detect(class,'(?!.*FP)_VUS$')~'VUS_Sarc-')) 
+                         str_detect(class,'(?!.*FP)_VUS$')~'VUS_Sarc-')) %>%
+  inverse_rank_transformer(c('lge_total')) #Rank-based inverse normalisation of lge_total over the combined sarcomere-positive and sarcomere-negative individuals
 
+#CMR phenotypes for this comparison (continuous_param_list above only contains the echo phenotypes)
+cmr_phenos <- c('wallthkmax', 'lvmassi', 'lge_total', 'ecvfwhole', 'lvef', 'lvs_ellmean', 'lvs_eccmean', 'lvs_errmean')
+cmr_param_list <- map(cmr_phenos, ~c(., coalesce(label_tb$Label[match(., label_tb$Variable)], .)))
+names(cmr_param_list) <- cmr_phenos
+rm(cmr_phenos)
 
 ```
 
@@ -443,7 +469,7 @@ plot_tester_multigroup <- function(input_tb,input_param_vector,output_path, cont
         labs(fill='Group')
       
       print(plot)
-      ggsave(str_c(output_path,'/',str_c(str_c(unique(plot_tb$group),collapse='_ '),phenotype_colname,'density_plot.png',sep='_')),dpi=600)
+      ggsave(str_c(output_path,'/',str_c(str_remove_all(str_c(unique(plot_tb$group),collapse='_ '),'/'),phenotype_colname,'density_plot.png',sep='_')),dpi=600) #Remove '/' (e.g. from P/LP) so it is not treated as a subdirectory
       
       output_kruskal_wallis <- tribble(
         ~pheno, ~groups, ~pval,
@@ -471,7 +497,7 @@ plot_tester_multigroup <- function(input_tb,input_param_vector,output_path, cont
            caption=str_c('Nominal Chi-squared sum p-value (post-filtering for groups with n>10 in both cells) = ', as.character(signif(chisq_results$p.value, digits=4))))
 
       print(heatmap_plot)
-      ggsave(str_c(output_path,'/',str_c(str_c(unique(plot_tb$group),collapse='_ '),phenotype_colname,'density_plot.png',sep='_')),dpi=600, width=10, height=6)
+      ggsave(str_c(output_path,'/',str_c(str_remove_all(str_c(unique(plot_tb$group),collapse='_ '),'/'),phenotype_colname,'density_plot.png',sep='_')),dpi=600, width=10, height=6) #Remove '/' (e.g. from P/LP) so it is not treated as a subdirectory
       
       output_chisq_test <- tribble(
       ~pheno, ~groups, ~pval,
@@ -482,12 +508,13 @@ plot_tester_multigroup <- function(input_tb,input_param_vector,output_path, cont
   }
   
 }
-pathogenicity_comp_redo_kw <- map(continuous_param_list,
+pathogenicity_comp_redo_kw <- map(cmr_param_list,
                                ~plot_tester_multigroup(phenotype_tb_sarcpos_sarcneg,., output_path='genetic_subset_analysis/RareVar/3_output/plots/7_PATHO_REDO/1_PLP_SARC+VUS_SARC-VUS' )) %>% bind_rows()
 
 write_tsv(pathogenicity_comp_redo_kw,'genetic_subset_analysis/RareVar/3_output/plots/7_PATHO_REDO/1_PLP_SARC+VUS_SARC-VUS/kw_summary.tsv'  )
 rm(pathogenicity_comp_redo_kw)
 ```
+
 ### Multivariate Linear Regression 
 Then I perform multivariate linear regression with the group variable, using the P/LP as the baseline group to correct for confounders such as age/sex.
 
@@ -549,7 +576,7 @@ linear_logistic_regression_modeller_multigroup <- function(input_tb, input_param
     
 }
 
-pathogenicity_comp_redo_linreg <- map(continuous_param_list,
+pathogenicity_comp_redo_linreg <- map(cmr_param_list,
                                ~linear_logistic_regression_modeller_multigroup(phenotype_tb_sarcpos_sarcneg,.)) %>% bind_rows() %>%
   filter(!variable %in% c('(Intercept)','age','sexFemale','bsa') ) %>%
   mutate(variable = str_match(variable,'group(.+)')[,2])
@@ -574,7 +601,8 @@ write_tsv(pathogenicity_comp_redo_linreg, str_c(patho_redo_output_path,'cont_sum
 rm(pathogenicity_comp_redo_linreg, patho_redo_output_path)
 
 ```
-### Sensitivity P/LP vs. VUS
+
+### Sensitivity Analysis: P/LP vs. VUS
 
 ```{r}
 #Also do for just P/LP vs. all VUS (2-group comparison)
@@ -583,7 +611,7 @@ pheno_tb_plp_vs_vus_redo <- phenotype_tb_sarcpos_sarcneg %>%
                          str_detect(class, 'VUS') ~ 'VUS_SARC+-',
                          T~NA))
 
-pathogenicity_comp_sensitivity_redo_wilcox <- map(continuous_param_list,
+pathogenicity_comp_sensitivity_redo_wilcox <- map(cmr_param_list,
                                ~plot_tester(pheno_tb_plp_vs_vus_redo,.,group1_name='P/LP', group2_name='VUS_SARC+-', output_path='genetic_subset_analysis/RareVar/3_output/plots/7_PATHO_REDO/2_PLP_VUS' )) %>% bind_rows()
 
 pathogenicity_comp_sensitivity_redo_wilcox <- pathogenicity_comp_sensitivity_redo_wilcox %>%
@@ -603,7 +631,7 @@ summary_plotter(pathogenicity_comp_sensitivity_redo_wilcox, pval='fdr', label=T,
 summary_plotter(pathogenicity_comp_sensitivity_redo_wilcox, pval='fdr', confint=T, label=T, output_path= path_comp_sens_redo_output_path)
 
 #Multivariate linear regression
-pathogenicity_comp_sensitivity_redo_lm <- map(continuous_param_list,
+pathogenicity_comp_sensitivity_redo_lm <- map(cmr_param_list,
                                               ~linear_logistic_regression_modeller(pheno_tb_plp_vs_vus_redo,.,
                                               group1_name='P/LP',group2_name='VUS_SARC+-')) %>% bind_rows()
 
