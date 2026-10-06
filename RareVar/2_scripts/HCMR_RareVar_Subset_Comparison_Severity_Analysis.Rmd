@@ -479,3 +479,78 @@ summary_counts_tb <- map_dfr(comparison_tbs_primarycomposite, ~.x %>%
 
 print(summary_counts_tb)
 ```
+
+This outputs for each composite and each comparison, the breakdown of the individual event types (underlying each composite) per group.
+
+```{r event_breakdown}
+#Clearer labels for the raw event codes (from hcmr_outcomes_preprocessor.Rmd)
+event_labels <- c(cardiac_death = 'Cardiac Death',
+                  vtach = 'Ventricular Tachyarrhythmia',
+                  transplant = 'Heart Transplant',
+                  lvad = 'LVAD Implantation',
+                  non_cardiac_death = 'Non-Cardiac Death',
+                  heart_failure_hospitalisation = 'Heart Failure Requiring Hospitalisation',
+                  atrial_fibrillation = 'Atrial Fibrillation Requiring Therapy',
+                  non_fatal_stroke = 'Non-Fatal Stroke',
+                  hf_death = 'Heart Failure Death',
+                  hf_hospitalisation = 'Heart Failure Requiring Hospitalisation',
+                  va_death = 'Ventricular Arrhythmic Death',
+                  unknown_death = 'Unknown Death')
+
+#This generates one event breakdown table per comparison, with columns Event | Count (Group 1) | Count (Group 2)
+event_breakdown_tb_gen <- function(comparison_tb){
+  group1_name <- levels(comparison_tb$group)[2]
+  group2_name <- levels(comparison_tb$group)[1]
+
+  output_tb <- comparison_tb %>%
+    filter(event_indicator == 1) %>%
+    count(group, event, name = 'n') %>%
+    complete(group, event, fill = list(n = 0)) %>% #Keeps zero counts for event types absent in one group
+    pivot_wider(names_from = group, values_from = n) %>%
+    select(Event = event, all_of(c(group1_name, group2_name))) %>%
+    arrange(Event) %>%
+    mutate(Event = recode(Event, !!!event_labels)) #Relabel raw event codes to clearer labels
+
+  output_tb <- bind_rows(output_tb, summarise(output_tb, Event = 'Total', across(-Event, sum))) %>%
+    rename_with(~ str_c('Count (', ., ')'), -Event)
+
+  return(output_tb)
+}
+
+comparison_labels <- c(thick_thin_tb = 'Thick vs. Thin',
+                       mybpc3_plof_nonlof_tb = 'MYBPC3_pLOF vs. MYBPC3_nonLOF',
+                       mybc3_myh7_tb = 'MYBPC3 vs. MYH7',
+                       p_lp_vus_vusfp_tb = 'Sarcomere-P/LP vs. Sarcomere-VUS')
+
+composite_comparison_tbs <- list(Primary = comparison_tbs_primarycomposite,
+                                 Secondary = comparison_tbs_secondarycomposite,
+                                 HF = comparison_tbs_hfcomposite,
+                                 AF = comparison_tbs_afcomposite,
+                                 VA = comparison_tbs_vacomposite)
+
+event_breakdown_tbs <- map(composite_comparison_tbs, ~ map(.x, event_breakdown_tb_gen))
+
+#Build all HTML kables into a single page, with one section per composite and one subtable per comparison
+event_breakdown_html <- imap(event_breakdown_tbs, function(composite_tbs, composite_name){
+  htmltools::tagList(
+    htmltools::h3(str_glue('{composite_name} Composite')),
+    imap(composite_tbs, function(tb, comparison_name){
+      tb %>%
+        kbl(caption = str_glue('{composite_name} composite: {comparison_labels[comparison_name]}'), align = c('l', 'r', 'r')) %>%
+        kable_styling(bootstrap_options = c('striped', 'condensed'), full_width = F, position = 'left') %>%
+        row_spec(nrow(tb), bold = T) %>%
+        as.character() %>%
+        htmltools::HTML()
+    })
+  )
+}) %>% htmltools::tagList()
+
+#Save the HTML page (open in browser and copy-paste into Excel) and display it in the Viewer pane
+htmltools::save_html(event_breakdown_html, 'genetic_subset_analysis/RareVar/3_output/plots/2_Severity/hcmr_rarevar_subset_event_breakdown.html')
+print(htmltools::browsable(event_breakdown_html))
+
+#Also write out each subtable as a TSV (pastes directly into Excel)
+iwalk(event_breakdown_tbs, function(composite_tbs, composite_name){
+  iwalk(composite_tbs, ~ write_tsv(.x, str_glue('genetic_subset_analysis/RareVar/3_output/plots/2_Severity/event_breakdown_{str_to_lower(composite_name)}_composite_{str_remove(.y, "_tb$")}.tsv')))
+})
+```

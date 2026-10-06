@@ -41,6 +41,56 @@ pergene_rarevar_classification <- read_tsv('genetic_subset_analysis/RareVar/3_ou
 pergene_perpatho_rarevar_classification <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class_plp_vusfpvus.tsv')
 ```
 
+### Gene Carrier Breakdown
+
+This breaks down all 915 sarcomere-positive individuals (both single- and multi-variant carriers) by the gene(s) in which they carry a rare variant. N.B. Multi-variant carriers across >1 gene are counted once in each gene they carry a variant in, so the per-gene counts sum to more than the number of individuals.
+
+```{r gene_carrier_breakdown}
+sarc_genes <- c('MYBPC3_pLOF','MYBPC3_nonLOF','MYH7','TNNI3','TNNT2','TPM1','MYL2','MYL3','ACTC1')
+
+carrier_tb <- pergene_rarevar_classification %>%
+  filter(HCR_ID %in% hcmr_sarcpos_tb_notransform$HCR_IDs) %>% #Filter only to the 915 sarcomere-positive individuals
+  select(HCR_ID, all_of(sarc_genes)) %>%
+  mutate(MYBPC3 = MYBPC3_pLOF + MYBPC3_nonLOF) #Any MYBPC3 carrier (pLOF and/or nonLOF)
+
+#Number of carriers (dosage >=1) per gene
+gene_carrier_counts <- carrier_tb %>%
+  summarise(across(-HCR_ID, ~sum(. >= 1, na.rm=T))) %>%
+  pivot_longer(everything(), names_to='Gene', values_to='Number of Carriers') %>%
+  mutate(Gene = factor(Gene, levels=c('MYBPC3', sarc_genes))) %>%
+  arrange(Gene) #MYBPC3 total is kept in the table alongside the pLOF/nonLOF breakdown
+
+print(gene_carrier_counts) #This is for all 915 so both single and multiple variant carriers so total sum in column > 915
+print(str_c('Total number of sarcomere-positive individuals:', n_distinct(carrier_tb$HCR_ID), sep=' '))
+
+write_csv(gene_carrier_counts, 'genetic_subset_analysis/RareVar/3_output/summary_tbs/gene_carrier_counts.csv')
+
+#Single horizontal stacked bar for the Central Illustration - MYBPC3 kept as a single block (pLOF + nonLOF combined)
+gene_carrier_plot <- gene_carrier_counts %>%
+  filter(!Gene %in% c('MYBPC3_pLOF','MYBPC3_nonLOF')) %>%
+  mutate(Gene = fct_rev(fct_drop(Gene))) %>% #So that MYBPC3 sits at the left of the bar
+  ggplot(aes(x=`Number of Carriers`, y='', fill=Gene)) +
+  geom_col(colour='white', width=0.6) +
+  scale_x_continuous(expand=c(0,0)) +
+  guides(fill=guide_legend(reverse=T, nrow=1)) +
+  labs(x=NULL, y=NULL, fill=NULL) +
+  theme_classic(base_size=36) + #2x the default base_size of 11
+  theme(axis.line.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.y=element_blank(),
+        legend.position='bottom',
+        panel.background=element_rect(fill='transparent', colour=NA),
+        plot.background=element_rect(fill='transparent', colour=NA),
+        legend.background=element_rect(fill='transparent', colour=NA))
+
+print(gene_carrier_plot)
+
+ggsave('genetic_subset_analysis/RareVar/3_output/summary_tbs/gene_carrier_stacked_bar.png', gene_carrier_plot, width=16, height=3.5, dpi=300, bg='transparent')
+ggsave('genetic_subset_analysis/RareVar/3_output/summary_tbs/gene_carrier_stacked_bar.pdf', gene_carrier_plot, width=16, height=3.5, bg='transparent')
+
+rm(sarc_genes, carrier_tb, gene_carrier_plot)
+```
+
 This outputs the number of individuals in each class.
 
 ```{r}
