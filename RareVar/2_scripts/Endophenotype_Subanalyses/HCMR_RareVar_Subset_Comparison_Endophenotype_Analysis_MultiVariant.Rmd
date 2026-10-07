@@ -20,14 +20,49 @@ rm(list=ls())
 theme_set(theme_classic(base_size=14))
 
 source('genetic_subset_analysis/common/hcmr_endophenotype_functions.R')
+
+#Rare variant classification source: 'KT' (original HCMR classification) or 'Powell' (George Powell's classification; see HCMR_RareVar_Subset_Comparison_Endophenotype_Analysis_Powell.Rmd)
+rarevar_class_source <- 'Powell'
+stopifnot(rarevar_class_source %in% c('KT','Powell'))
 ```
 
 ## Import
 
+Under the Powell classification, the sarcomere-positive cohort and the single vs. multiple variant classification are taken from the Powell outputs (HCMR_RareVar_Classification_Powell.Rmd and HCMR_RareVar_Subset_Comparison_Endophenotype_Analysis_Powell.Rmd), and all outputs are written to a Powell/ subdirectory so the KT outputs are not overwritten.
+
 ```{r import, echo=F}
-hcmr_sarcpos_tb <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_sarcpos_pheno_rarevarclasses_transform.tsv')
-hcmr_sarcpos_tb_notransform_lgelogged <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_sarcpos_pheno_rarevarclasses_notransform_lgelogged.tsv')
-hcmr_sarcpos_tb_notransform <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_sarcpos_pheno_rarevarclasses_notransform.tsv')
+class_suffix <- ifelse(rarevar_class_source == 'Powell', '_powell', '')
+
+hcmr_sarcpos_tb <- read_tsv(str_c('genetic_subset_analysis/RareVar/3_output/data/hcmr_sarcpos_pheno_rarevarclasses_transform', class_suffix, '.tsv'))
+hcmr_sarcpos_tb_notransform_lgelogged <- read_tsv(str_c('genetic_subset_analysis/RareVar/3_output/data/hcmr_sarcpos_pheno_rarevarclasses_notransform_lgelogged', class_suffix, '.tsv'))
+hcmr_sarcpos_tb_notransform <- read_tsv(str_c('genetic_subset_analysis/RareVar/3_output/data/hcmr_sarcpos_pheno_rarevarclasses_notransform', class_suffix, '.tsv'))
+
+#Under Powell, restrict to Powell SARC+ variants in the core 8 sarcomeric genes (as per HCMR_RareVar_Subset_Comparison_Endophenotype_Analysis_Powell.Rmd)
+#Variant dosage is counted only across the core 8 gene bins, so non-sarcomeric (e.g. CSRP3, PLN) variants neither define sarcomere-positivity nor make an individual 'Multi'
+if (rarevar_class_source == 'Powell'){
+  core_sarc_genes <- c('MYBPC3','MYH7','TNNT2','TNNI3','TPM1','MYL2','MYL3','ACTC1')
+  powell_core_dosage <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class_powell.tsv') %>%
+    mutate(core_dosage = rowSums(select(., any_of(c('MYBPC3_pLOF','MYBPC3_nonLOF', core_sarc_genes))), na.rm=T)) %>%
+    select(HCR_ID, core_dosage)
+  core_ids <- filter(powell_core_dosage, core_dosage >= 1)$HCR_ID
+
+  print(str_glue('Filtering out {sum(!hcmr_sarcpos_tb$HCR_IDs %in% core_ids)} Powell sarcomere-positive individuals without a variant in the core 8 sarcomeric genes.'))
+  hcmr_sarcpos_tb <- filter(hcmr_sarcpos_tb, HCR_IDs %in% core_ids)
+  hcmr_sarcpos_tb_notransform_lgelogged <- filter(hcmr_sarcpos_tb_notransform_lgelogged, HCR_IDs %in% core_ids)
+  hcmr_sarcpos_tb_notransform <- filter(hcmr_sarcpos_tb_notransform, HCR_IDs %in% core_ids)
+  rm(core_sarc_genes, core_ids)
+}
+
+overlapvars_path <- ifelse(rarevar_class_source == 'Powell',
+                           'genetic_subset_analysis/RareVar/3_output/individual_class/overlap_variants/hcmr_powell_overlapvariants.tsv',
+                           'genetic_subset_analysis/RareVar/3_output/individual_class/overlap_variants/hcmr_KT_overlapvariants.tsv')
+
+output_plot_dir <- ifelse(rarevar_class_source == 'Powell',
+                          'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/Powell/',
+                          'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/')
+lm_output_dir <- str_c(output_plot_dir, '1_LM/MultiVariant/')
+wilcoxon_output_dir <- str_c(output_plot_dir, '2_Wilcoxon/MultiVariant/')
+walk(c(lm_output_dir, wilcoxon_output_dir), ~dir.create(., showWarnings=F, recursive=T))
 ```
 
 ## Phenotypes for Comparison
@@ -75,8 +110,8 @@ This subset can be broken down into a few sub-types:
 
 ```{r multi-dosage individuals}
 
-all_merged_overlapvars_tb <- read_tsv('genetic_subset_analysis/RareVar/3_output/individual_class/overlap_variants/hcmr_KT_overlapvariants.tsv') %>%
-  filter(HCR_ID %in% hcmr_sarcpos_tb$HCR_IDs) #Filter only to the 882 sarcomere-positive individuals
+all_merged_overlapvars_tb <- read_tsv(overlapvars_path) %>%
+  filter(HCR_ID %in% hcmr_sarcpos_tb$HCR_IDs) #Filter only to the sarcomere-positive individuals (882 under KT)
 
 #Identify the number of homozygotes and the number of multiple heterozygotes
 homozygotes <- all_merged_overlapvars_tb %>% 
@@ -88,6 +123,16 @@ print(str_c('There are', nrow(homozygotes), 'homozygotes and',length(unique(mult
 
 #These are all the individuals with >1 dosage of rare variant
 multi_dosage_ids <- unique(c(homozygotes$HCR_ID,multi_het$HCR_ID))
+
+#Under Powell, redefine as >1 dosage across the core 8 sarcomeric gene bins only (the overlap variants above include non-sarcomeric e.g. CSRP3, PLN variants)
+if (rarevar_class_source == 'Powell'){
+  multi_dosage_ids <- powell_core_dosage %>%
+    filter(core_dosage > 1, HCR_ID %in% hcmr_sarcpos_tb$HCR_IDs) %>%
+    pull(HCR_ID)
+  print(str_glue('Under Powell (core 8 sarcomeric genes only): {length(multi_dosage_ids)} individuals with >1 dose of a rare variant'))
+}
+
+multi_var_individuals <- all_merged_overlapvars_tb %>% filter(HCR_ID %in% multi_dosage_ids)
 ```
 
 Then generate the phenotype tbs for the single vs. multiple-variant comparison.
@@ -132,24 +177,24 @@ multi_vs_single_lm_results <- map(continuous_param_list, ~linear_logistic_regres
 multi_vs_single_lm_results <- colour_hardcoder(multi_vs_single_lm_results)
 
 
-summary_plotter(multi_vs_single_lm_results,output_path='genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/MultiVariant/',  mtc='fdr',test='LinearRegression',xlabel='Coefficient Estimate',confint=T, label=T, comporder = c('Multi vs. Single'))
+# summary_plotter(multi_vs_single_lm_results,output_path=lm_output_dir,  mtc='fdr',test='LinearRegression',xlabel='Coefficient Estimate',confint=T, label=T, comporder = c('Multi vs. Single'))
 
-write_tsv(multi_vs_single_lm_results,'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/MultiVariant/allmulti_vs_single_lm_results.tsv')
+write_tsv(multi_vs_single_lm_results,str_c(lm_output_dir, 'allmulti_vs_single_lm_results.tsv'))
 
-summary_plotter(multi_vs_single_lm_results,output_path='genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/MultiVariant/',  mtc='fdr',test='LinearRegression',xlabel='Coefficient Estimate',confint=T, poster=T, comporder = c('Multi vs. Single'), height=6, width=10)
+# summary_plotter(multi_vs_single_lm_results,output_path=lm_output_dir,  mtc='fdr',test='LinearRegression',xlabel='Coefficient Estimate',confint=T, poster=T, comporder = c('Multi vs. Single'), height=6, width=10)
 ```
 
 This plots the summary plot as a facetted forest plot instead.
 
 ```{r}
-multi_vs_single_lm_results <- read_tsv('genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/MultiVariant/allmulti_vs_single_lm_results.tsv') %>%
-  mutate(Label_short = str_match(Label_short, '(^[^()]+)')[,2]) %>%
-  select(-Label) %>%
-  dplyr::rename(Label = Label_short, predictor_label = comparison) %>%
-  mutate(adj_p = p.adjust(pval, method='BH'))  %>%
-  mutate(predictor_reported = predictor_label)
+# multi_vs_single_lm_results <- read_tsv(str_c(lm_output_dir, 'allmulti_vs_single_lm_results.tsv')) %>%
+#   mutate(Label_short = str_match(Label_short, '(^[^()]+)')[,2]) %>%
+#   select(-Label) %>%
+#   dplyr::rename(Label = Label_short, predictor_label = comparison) %>%
+#   mutate(adj_p = p.adjust(pval, method='BH'))  %>%
+#   mutate(predictor_reported = predictor_label)
 
-summary_forest_plotter(multi_vs_single_lm_results, 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/MultiVariant/', file_name = 'LinearRegression_multivssingle_summary_forestplot_fdr.png', sigphenos_only=F,facet_order=c(c('Multi vs. Single')), height = 6, width=4)
+# summary_forest_plotter(multi_vs_single_lm_results, lm_output_dir, file_name = 'LinearRegression_multivssingle_summary_forestplot_fdr.png', sigphenos_only=F,facet_order=c(c('Multi vs. Single')), height = 6, width=4)
 ```
 
 ```{r}
@@ -171,17 +216,17 @@ multi_vs_single_lm_results_notransform <- map(continuous_param_list, ~linear_log
   )) %>%
     mutate(Label_short = str_c(Label_short, ' (', comparison,')'))
 
-write_tsv(multi_vs_single_lm_results_notransform,'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/MultiVariant/allmulti_vs_single_lm_notransform_results.tsv')
+write_tsv(multi_vs_single_lm_results_notransform,str_c(lm_output_dir, 'allmulti_vs_single_lm_notransform_results.tsv'))
 ```
 
 ```{r}
 #Wilcoxon rank sum test on nontransformed tibble results for those which are MTC-significant
 
-multi_vs_single_wilcoxon_results <- map(
-  continuous_param_list[names(continuous_param_list) %in% c('lge_total')],
-  ~plot_tester(input_tb=multi_vs_single_tb_notransform,.,group1_name='Multi', group2_name='Single', output_path='genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/2_Wilcoxon/MultiVariant/')
-  ) %>% 
-    bind_rows()
+# multi_vs_single_wilcoxon_results <- map(
+#   continuous_param_list[names(continuous_param_list) %in% c('lge_total')],
+#   ~plot_tester(input_tb=multi_vs_single_tb_notransform,.,group1_name='Multi', group2_name='Single', output_path=wilcoxon_output_dir)
+#   ) %>% 
+#     bind_rows()
 ```
 
 This outputs the summary scatter (volcano) plot as a single panel for the Multi vs. Single comparison, using the same panelled format as the main analysis (shared axes, phenotype colours, FDR-significant points filled, direction-of-effect annotated).
@@ -189,11 +234,11 @@ This outputs the summary scatter (volcano) plot as a single panel for the Multi 
 ```{r multi_vs_single_lm_summary_panelplot, fig.width=7, fig.height=6}
 #summary_panel_plotter() is defined in genetic_subset_analysis/common/hcmr_endophenotype_functions.R
 #Re-read the summary tibble as multi_vs_single_lm_results is modified in the forest plot chunk above
-multi_vs_single_lm_summary_panel <- read_tsv('genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/MultiVariant/allmulti_vs_single_lm_results.tsv')
+multi_vs_single_lm_summary_panel <- read_tsv(str_c(lm_output_dir, 'allmulti_vs_single_lm_results.tsv'))
 
 summary_panel_plotter(
   multi_vs_single_lm_summary_panel,
-  output_path = 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/MultiVariant/',
+  output_path = lm_output_dir,
   file_name = 'LinearRegression_multivssingle_summary_panelplot_fdr.png',
   comporder = c('Multi vs. Single'),
   width = 7,
@@ -210,31 +255,40 @@ sig_density_plotter(
   summary_tb = multi_vs_single_lm_summary_panel,
   comparison_tbs_list = list(multi_vs_single_tb_notransform), #group levels = c('Single','Multi') -> 'Multi vs. Single'
   param_list = continuous_param_list,
-  output_path = 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/2_Wilcoxon/MultiVariant/',
+  output_path = wilcoxon_output_dir,
   file_name = 'Significant_findings_multivssingle_raw_histogram_panelplot.png',
   comporder = c('Multi vs. Single'),
   palette = list('Multi vs. Single' = c('#E7298A', '#1B9E77'))
 )
 ```
 
-This combines the Multi vs. Single summary scatter (top) with the raw phenotype histograms for significant findings (underneath) into a single publication figure.
+This combines the Multi vs. Single summary scatter (top) with the raw phenotype distributions for significant findings (underneath) into a single publication figure.
+
+Two versions are output: overlapping histograms and violin plots (with inner boxplots).
 
 ```{r multi_vs_single_combined_publication_figure, fig.width=10, fig.height=10}
 #combined_figure_plotter() is defined in genetic_subset_analysis/common/hcmr_endophenotype_functions.R
-combined_figure_plotter(
-  summary_tb = multi_vs_single_lm_summary_panel,
-  comparison_tbs_list = list(multi_vs_single_tb_notransform),
-  param_list = continuous_param_list,
-  output_path = 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/1_LM/MultiVariant/',
-  file_name = 'LinearRegression_multivssingle_summary_panelplot_with_histograms.png',
-  scatter_file_name = 'LinearRegression_multivssingle_summary_panelplot_fdr_legendright.png',
-  density_file_name = 'Significant_findings_multivssingle_raw_histogram_panelplot.png',
-  comporder = c('Multi vs. Single'),
-  palette = list('Multi vs. Single' = c('#E7298A', '#1B9E77')),
-  scatter_height = 6,
-  width = 10
-)
+multi_vs_single_combined_figs <- map(c('histogram', 'violin'), function(dist_type){
+  combined_figure_plotter(
+    summary_tb = multi_vs_single_lm_summary_panel,
+    comparison_tbs_list = list(multi_vs_single_tb_notransform),
+    param_list = continuous_param_list,
+    output_path = lm_output_dir,
+    file_name = str_c('LinearRegression_multivssingle_summary_panelplot_with_', dist_type, 's.png'),
+    scatter_file_name = 'LinearRegression_multivssingle_summary_panelplot_fdr_legendright.png',
+    density_file_name = str_c('Significant_findings_multivssingle_raw_', dist_type, '_panelplot.png'),
+    comporder = c('Multi vs. Single'),
+    palette = list('Multi vs. Single' = c('#E7298A', '#1B9E77')),
+    scatter_height = 6,
+    width = 10,
+    dist_type = dist_type
+  )
+})
+
+walk(multi_vs_single_combined_figs, print)
 ```
+
+Under KT classification:
 
 These 26 individuals can be sub-categorised into
 
@@ -248,7 +302,9 @@ Above 2 are defunct and false positive.
 5) 19x double heterozygotes for 1x P/LP variant and 1x VUS variant
 6) 2x double heterozygotes for 2x VUS variants
 
-```{r multi_dosage_subcategorisation}
+N.B. This sub-categorisation (and the counts above) relies on the KT P/LP vs. VUS curation tiers. Powell's classification has no pathogenicity tier (all Curation = SARC+), so this chunk is only run when rarevar_class_source == 'KT'.
+
+```{r multi_dosage_subcategorisation, eval=(rarevar_class_source == 'KT')}
 
 cat1 <- multi_vs_single_tb_notransform %>%
   filter(HCR_IDs %in% filter(homozygotes, Curation1 %in% c('P','LP'), dosage1==2, dosage2==1)$HCR_ID)
