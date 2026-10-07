@@ -26,7 +26,7 @@ This reruns HCMR_RareVar_Subset_Comparison_Endophenotype_Analysis.Rmd as a sensi
 
 Differences vs. the main analysis:
 
-- Sarcomere-positive = carries >=1 Powell SARC+ variant (rather than KT sarcomere status with the MYBPC3-VUS false-positive correction)
+- Sarcomere-positive = carries >=1 Powell SARC+ variant in the core 8 sarcomeric genes (MYBPC3, MYH7, TNNT2, TNNI3, TPM1, MYL2, MYL3, ACTC1) (rather than KT sarcomere status with the MYBPC3-VUS false-positive correction)
 - Powell's classification has no pathogenicity tier, so the P/LP vs. VUS comparison is not performed (3 comparisons only)
 - All outputs are written with a _powell suffix or to a Powell/ subdirectory so the main analysis outputs are not overwritten
 
@@ -42,6 +42,13 @@ hcmr_tb <- hcmr_tb %>%
   filter(HCR_IDs %in% hcmr_ids_of_interest$HCR_IDs) #Now filter to those individuals of interest
 
 pergene_rarevar_classification <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class_powell.tsv')
+
+#Restrict Powell SARC+ to individuals with >=1 SARC+ variant in the core 8 sarcomeric genes (i.e. drop carriers of only non-sarcomeric e.g. CSRP3, PLN variants) so sarcomere-positive status is comparable to KT
+core_sarc_genes <- c('MYBPC3','MYH7','TNNT2','TNNI3','TPM1','MYL2','MYL3','ACTC1')
+print(str_glue('Filtering out {sum(!str_detect(pergene_rarevar_classification$class, str_c(core_sarc_genes, collapse="|")))} Powell SARC+ individuals without a variant in the core 8 sarcomeric genes.'))
+pergene_rarevar_classification <- pergene_rarevar_classification %>%
+  filter(str_detect(class, str_c(core_sarc_genes, collapse='|')))
+rm(core_sarc_genes)
 falsepositive_mybpc3_vus_individuals <- readRDS('genetic_subset_analysis/common/falsepositive_mybpc3_vus_individuals.rds')
 hcmr_tb <- hcmr_tb %>%
   mutate(sarcomere_kt = ifelse(HCR_IDs %in% falsepositive_mybpc3_vus_individuals, FALSE, sarcomere)) %>% #Retain the KT sarcomere status (with the MYBPC3-VUS false-positive correction, as in the main analysis) for the classification comparison below
@@ -188,7 +195,6 @@ This builds a single overall phenotype tibble with the primary rare variant clas
 #Build the phenotype tibble with the Powell per-gene classification
 hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>%
   left_join(select(pergene_rarevar_classification,HCR_ID, class_primary=class), by=c('HCR_IDs'='HCR_ID'))
-
 #Some phenotype-specific preprocessing
 hcmr_sarcpos_tb <- hcmr_sarcpos_tb %>%
     mutate(lge_total_bin = case_when(lge_total==0 ~ '0%',
@@ -438,29 +444,29 @@ Unlike the main analysis (where the phenotypes are hardcoded), the phenotypes te
 All NA values are filtered out and resulting counts per group are printed in the plot.
 
 ```{r plot_test}
-mtc_sig_lm <- cont_lm_summary_tb %>%
-  mutate(adj_pval = p.adjust(pval, method='fdr')) %>%
-  filter(adj_pval < 0.05) %>%
-  select(-adj_pval)
+# mtc_sig_lm <- cont_lm_summary_tb %>%
+#   mutate(adj_pval = p.adjust(pval, method='fdr')) %>%
+#   filter(adj_pval < 0.05) %>%
+#   select(-adj_pval)
 
-print(mtc_sig_lm$Label_short)
+# print(mtc_sig_lm$Label_short)
 
-#Run the pairwise Wilcoxon rank sum tests and distribution plotting for each MTC-significant comparison but on the non-transformed phenotypes
-wilcoxon_subdirs <- c('thick_thin','mybpc3_plof_nonlof','mybpc3_myh7')
+# #Run the pairwise Wilcoxon rank sum tests and distribution plotting for each MTC-significant comparison but on the non-transformed phenotypes
+# wilcoxon_subdirs <- c('thick_thin','mybpc3_plof_nonlof','mybpc3_myh7')
 
-cont_wilcoxon_summary_tb <- pmap(list(comparison_tbs_notransform, comparison_groups, wilcoxon_subdirs), function(tb, grps, subdir){
-  sig_phenos <- mtc_sig_lm %>%
-    filter(group1 == grps[1], group2 == grps[2]) %>%
-    pull(pheno)
-  map(
-    continuous_param_list[names(continuous_param_list) %in% sig_phenos],
-    ~plot_tester(input_tb=tb, ., group1_name=grps[1], group2_name=grps[2], output_path=str_c(output_plot_dir, '2_Wilcoxon/', subdir))
-  ) %>%
-    bind_rows()
-}) %>%
-  bind_rows()
+# cont_wilcoxon_summary_tb <- pmap(list(comparison_tbs_notransform, comparison_groups, wilcoxon_subdirs), function(tb, grps, subdir){
+#   sig_phenos <- mtc_sig_lm %>%
+#     filter(group1 == grps[1], group2 == grps[2]) %>%
+#     pull(pheno)
+#   map(
+#     continuous_param_list[names(continuous_param_list) %in% sig_phenos],
+#     ~plot_tester(input_tb=tb, ., group1_name=grps[1], group2_name=grps[2], output_path=str_c(output_plot_dir, '2_Wilcoxon/', subdir))
+#   ) %>%
+#     bind_rows()
+# }) %>%
+#   bind_rows()
 
-cont_wilcoxon_summary_tb
+# cont_wilcoxon_summary_tb
 ```
 
 ## Supplementary: Raw Phenotype Distributions for Significant Findings
