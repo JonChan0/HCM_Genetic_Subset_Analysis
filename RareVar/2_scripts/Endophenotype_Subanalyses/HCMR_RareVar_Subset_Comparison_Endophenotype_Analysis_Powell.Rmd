@@ -42,11 +42,12 @@ hcmr_tb <- hcmr_tb %>%
   filter(HCR_IDs %in% hcmr_ids_of_interest$HCR_IDs) #Now filter to those individuals of interest
 
 pergene_rarevar_classification <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class_powell.tsv')
+falsepositive_mybpc3_vus_individuals <- readRDS('genetic_subset_analysis/common/falsepositive_mybpc3_vus_individuals.rds')
 hcmr_tb <- hcmr_tb %>%
-  mutate(sarcomere_kt = sarcomere) %>% #Retain the original (KT) sarcomere status for the classification comparison below
+  mutate(sarcomere_kt = ifelse(HCR_IDs %in% falsepositive_mybpc3_vus_individuals, FALSE, sarcomere)) %>% #Retain the KT sarcomere status (with the MYBPC3-VUS false-positive correction, as in the main analysis) for the classification comparison below
   mutate(sarcomere = HCR_IDs %in% pergene_rarevar_classification$HCR_ID) #Sarcomere-positive redefined as carrying >=1 Powell SARC+ variant
 
-rm(hcmr_ids_of_interest)
+rm(hcmr_ids_of_interest, falsepositive_mybpc3_vus_individuals)
 
 output_data_dir <- 'genetic_subset_analysis/RareVar/3_output/data/'
 output_plot_dir <- 'genetic_subset_analysis/RareVar/3_output/plots/1_Endophenotype/Powell/'
@@ -55,14 +56,17 @@ walk(str_c(output_plot_dir, c('0_Classification_Comparison/','1_LM/','2_Wilcoxon
 
 ## Variant Classification Comparison: KT vs. Powell
 
-This compares sarcomere-positive status under the original (KT) variant classification (sarcomere==TRUE in hcmr_tb) against the Powell classification (carrying >=1 Powell SARC+ variant), within the analysed HCMR cohort.
+This compares sarcomere-positive status under the original (KT) variant classification against the Powell classification (carrying >=1 Powell SARC+ variant), within the analysed HCMR cohort.
 
-N.B. KT status here is the raw sarcomere column, i.e. without the MYBPC3-VUS false-positive correction used in the main analysis.
+N.B. KT status here includes the MYBPC3-VUS false-positive correction used in the main analysis (so matches its sarcomere-positive count).
 
 ```{r classification_comparison}
+pergene_rarevar_classification_kt <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class.tsv') #KT per-gene classification (as used in the main analysis)
+
 class_comparison_tb <- hcmr_tb %>%
   select(HCR_IDs, sarcomere_kt, sarcomere_powell = sarcomere) %>%
   distinct() %>%
+  left_join(select(pergene_rarevar_classification_kt, HCR_ID, kt_class = class), by=c('HCR_IDs'='HCR_ID')) %>%
   left_join(select(pergene_rarevar_classification, HCR_ID, powell_class = class), by=c('HCR_IDs'='HCR_ID')) %>%
   mutate(concordance = case_when(
     is.na(sarcomere_kt) ~ 'KT status missing',
@@ -94,7 +98,6 @@ po <- sum(diag(class_contingency)) / sum(class_contingency)
 pe <- sum(rowSums(class_contingency) * colSums(class_contingency)) / sum(class_contingency)^2
 kappa <- (po - pe) / (1 - pe)
 print(str_glue('Percentage agreement: {round(100 * po, 1)}%; Cohen\'s kappa: {round(kappa, 3)}'))
-mcnemar.test(class_contingency)
 
 write_tsv(class_comparison_tb, str_c(output_data_dir, 'hcmr_sarcomere_kt_vs_powell_comparison.tsv'))
 ```
@@ -125,8 +128,18 @@ class_comparison_tb %>%
   count(concordance, powell_class) %>%
   pivot_wider(names_from = concordance, values_from = n, values_fill = 0) %>%
   arrange(desc(rowSums(across(where(is.numeric)))))
+```
 
-rm(class_comparison_complete_tb, class_contingency, class_contingency_plot, po, pe, kappa)
+This breaks down the KT per-gene class for KT sarcomere-positive individuals by concordance with Powell, to show which KT gene classes are SARC+ in KT only (i.e. lost under Powell).
+
+```{r classification_comparison_breakdown_kt}
+class_comparison_tb %>%
+  filter(sarcomere_kt) %>%
+  count(concordance, kt_class) %>%
+  pivot_wider(names_from = concordance, values_from = n, values_fill = 0) %>%
+  arrange(desc(`SARC+ in KT only`))
+
+rm(class_comparison_complete_tb, class_contingency, class_contingency_plot, po, pe, kappa, pergene_rarevar_classification_kt)
 ```
 
 ## Phenotypes for Comparison
@@ -343,25 +356,25 @@ cont_lm_summary_tb <- colour_hardcoder(cont_lm_summary_tb)
 This plots out the summary plot from the continuous phenotypes via linear regression - so adjusted for age/sex and BSA if necessary.
 
 ```{r lm_summary, fig.width=9, fig.height=6}
-summary_plotter(cont_lm_summary_tb,output_path=str_c(output_plot_dir, '1_LM/'), mtc='fdr',confint=T, label=T, test='LinearRegression',xlabel='Coefficient Estimate', height=7, width=9, shape_values=c(15,16,17), comporder=comporder)
+# summary_plotter(cont_lm_summary_tb,output_path=str_c(output_plot_dir, '1_LM/'), mtc='fdr',confint=T, label=T, test='LinearRegression',xlabel='Coefficient Estimate', height=7, width=9, shape_values=c(15,16,17), comporder=comporder)
 
 write_tsv(cont_lm_summary_tb, str_c(output_plot_dir, '1_LM/cont_summary_tb.tsv'))
 
 #This is for publication
-summary_plotter(cont_lm_summary_tb,output_path=str_c(output_plot_dir, '1_LM/'), mtc='fdr',confint=T, poster=T, test='LinearRegression',xlabel='Coefficient Estimate', height=6, width=11, shape_values=c(15,16,17), comporder=comporder)
+# summary_plotter(cont_lm_summary_tb,output_path=str_c(output_plot_dir, '1_LM/'), mtc='fdr',confint=T, poster=T, test='LinearRegression',xlabel='Coefficient Estimate', height=6, width=11, shape_values=c(15,16,17), comporder=comporder)
 ```
 
 This outputs the summary plot as facetted forest plots instead with significance stars for multiple testing comparison.
 
 ```{r}
-cont_lm_summary_tb_forest <- read_tsv(str_c(output_plot_dir, '1_LM/cont_summary_tb.tsv')) %>%
-  mutate(Label_short = str_match(Label_short, '(^[^()]+)')[,2]) %>%
-  select(-Label) %>%
-  dplyr::rename(Label = Label_short, predictor_label = comparison) %>%
-  mutate(adj_p = p.adjust(pval, method='BH'))  %>%
-  mutate(predictor_reported = predictor_label)
+# cont_lm_summary_tb_forest <- read_tsv(str_c(output_plot_dir, '1_LM/cont_summary_tb.tsv')) %>%
+#   mutate(Label_short = str_match(Label_short, '(^[^()]+)')[,2]) %>%
+#   select(-Label) %>%
+#   dplyr::rename(Label = Label_short, predictor_label = comparison) %>%
+#   mutate(adj_p = p.adjust(pval, method='BH'))  %>%
+#   mutate(predictor_reported = predictor_label)
 
-summary_forest_plotter(cont_lm_summary_tb_forest, str_c(output_plot_dir, '1_LM/'), file_name = 'LinearRegression_summary_forestplot_fdr.png', sigphenos_only=F,facet_order=c('Thick vs. Thin','MYBPC3 vs. MYH7','MYBPC3_pLOF vs. MYBPC3_nonLOF'), height=9, width=6)
+# summary_forest_plotter(cont_lm_summary_tb_forest, str_c(output_plot_dir, '1_LM/'), file_name = 'LinearRegression_summary_forestplot_fdr.png', sigphenos_only=F,facet_order=c('Thick vs. Thin','MYBPC3 vs. MYH7','MYBPC3_pLOF vs. MYBPC3_nonLOF'), height=9, width=6)
 ```
 
 This outputs an alternative to the single combined scatter (volcano) summary plot: a 3-panel plot with one panel per genotypic comparison, sharing the same x-axis (standardised coefficient estimate) and y-axis (-log10 FDR-adjusted p-value) across all panels. Points are coloured by phenotype, filled if FDR-significant, with direction-of-effect annotated per panel.
@@ -468,7 +481,9 @@ sig_density_plotter(
 
 ## Publication Figure: Panelled Summary Scatter + Raw Phenotype Distributions
 
-This combines the 3-panel summary scatter plot (top) with the raw phenotype histograms for significant findings (underneath) into a single publication figure. Panels are tagged sequentially (A = summary scatter; B onwards = one density row per comparison).
+This combines the 3-panel summary scatter plot (top) with the raw phenotype distributions for significant findings (underneath) into a single publication figure. Panels are tagged sequentially (A = summary scatter; B onwards = one distribution row per comparison).
+
+Two versions are output: overlapping histograms and violin plots (with inner boxplots).
 
 ```{r combined_publication_figure, fig.width=12, fig.height=20}
 #combined_figure_plotter() is defined in genetic_subset_analysis/common/hcmr_endophenotype_functions.R
@@ -477,7 +492,19 @@ combined_figure_plotter(
   comparison_tbs_list = read_rds(str_c(output_data_dir, 'hcmr_comparison_tbs_notransform_powell.rds')),
   param_list = continuous_param_list,
   output_path = str_c(output_plot_dir, '1_LM/'),
-  comporder = comporder
+  comporder = comporder,
+  dist_type = 'histogram'
+)
+```
+
+```{r combined_publication_figure_violin, fig.width=12, fig.height=20}
+combined_figure_plotter(
+  summary_tb = read_tsv(str_c(output_plot_dir, '1_LM/cont_summary_tb.tsv')),
+  comparison_tbs_list = read_rds(str_c(output_data_dir, 'hcmr_comparison_tbs_notransform_powell.rds')),
+  param_list = continuous_param_list,
+  output_path = str_c(output_plot_dir, '1_LM/'),
+  comporder = comporder,
+  dist_type = 'violin'
 )
 ```
 

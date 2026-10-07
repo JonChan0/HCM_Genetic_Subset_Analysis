@@ -1375,6 +1375,82 @@ summary_panel_plotter <- function(
   return(panel_plot)
 }
 
+#Shared data prep for sig_density_plotter() / sig_violin_plotter(): significant comparison x phenotype pairs,
+#their raw values in long format, and per-phenotype facet labels. Returns NULL if nothing is significant
+sig_findings_prepper <- function(
+  summary_tb,
+  comparison_tbs_list,
+  param_list,
+  comporder,
+  mtc,
+  alpha
+) {
+  #Significant comparison x phenotype pairs (MTC across all tests, consistent with summary_plotter)
+  sig_tb <- summary_tb %>%
+    mutate(adj_p = p.adjust(pval, method = mtc)) %>%
+    filter(adj_p < alpha) %>%
+    mutate(comparison = str_c(group1, ' vs. ', group2)) #Built from group1/group2 to match the label rebuilt from the comparison_tbs below
+
+  if (nrow(sig_tb) == 0) {
+    return(NULL)
+  }
+
+  sig_phenos <- unique(sig_tb$pheno)
+
+  #Raw values in long format; comparison label rebuilt from group factor levels (levels = c(group2, group1))
+  raw_long <- map_dfr(comparison_tbs_list, function(tb) {
+    lv <- levels(tb$group)
+    tb %>%
+      mutate(
+        group = as.character(group),
+        comparison = str_c(lv[2], ' vs. ', lv[1])
+      ) %>%
+      select(HCR_IDs, group, comparison, any_of(sig_phenos)) %>%
+      pivot_longer(any_of(sig_phenos), names_to = 'pheno', values_to = 'value')
+  }) %>%
+    filter(!is.na(value)) %>%
+    semi_join(sig_tb, by = c('comparison', 'pheno'))
+
+  #Sub-panel titles: native-unit phenotype label only
+  facet_tb <- sig_tb %>%
+    mutate(
+      facet_label = str_wrap(
+        map_chr(pheno, ~ param_list[[.x]][2]),
+        35
+      )
+    ) %>%
+    select(comparison, pheno, group1, group2, facet_label)
+
+  list(
+    sig_tb = sig_tb,
+    raw_long = raw_long,
+    facet_tb = facet_tb,
+    comps_present = intersect(comporder, unique(sig_tb$comparison))
+  )
+}
+
+#Per-comparison long tibble (with facet labels) and named group colour vector, shared by the density/violin plotters
+sig_comparison_data <- function(prep, comp, palette, default_palette) {
+  comp_facets <- filter(prep$facet_tb, comparison == comp)
+  g1 <- comp_facets$group1[1]
+  g2 <- comp_facets$group2[1]
+  comp_palette <- if (!is.null(palette[[comp]])) {
+    palette[[comp]]
+  } else {
+    default_palette
+  }
+
+  comp_tb <- prep$raw_long %>%
+    filter(comparison == comp) %>%
+    left_join(
+      select(comp_facets, comparison, pheno, facet_label),
+      by = c('comparison', 'pheno')
+    ) %>%
+    mutate(group = factor(group, levels = c(g1, g2)))
+
+  list(comp_tb = comp_tb, group_cols = set_names(comp_palette, c(g1, g2)))
+}
+
 #This plots the raw (non-transformed) phenotype distributions as overlapping histograms across both subgroups
 #for every significant comparison x phenotype finding; one row per comparison, one sub-panel per phenotype
 sig_density_plotter <- function(
@@ -1406,65 +1482,26 @@ sig_density_plotter <- function(
 ) {
   hist_scale <- match.arg(hist_scale)
 
-  #Significant comparison x phenotype pairs (MTC across all tests, consistent with summary_plotter)
-  sig_tb <- summary_tb %>%
-    mutate(adj_p = p.adjust(pval, method = mtc)) %>%
-    filter(adj_p < alpha) %>%
-    mutate(comparison = str_c(group1, ' vs. ', group2)) #Built from group1/group2 to match the label rebuilt from the comparison_tbs below
+  prep <- sig_findings_prepper(
+    summary_tb,
+    comparison_tbs_list,
+    param_list,
+    comporder,
+    mtc,
+    alpha
+  )
 
-  if (nrow(sig_tb) == 0) {
+  if (is.null(prep)) {
     message(
       'No significant findings at the chosen threshold; no density plot produced.'
     )
     return(invisible(NULL))
   }
 
-  sig_phenos <- unique(sig_tb$pheno)
-
-  #Raw values in long format; comparison label rebuilt from group factor levels (levels = c(group2, group1))
-  raw_long <- map_dfr(comparison_tbs_list, function(tb) {
-    lv <- levels(tb$group)
-    tb %>%
-      mutate(
-        group = as.character(group),
-        comparison = str_c(lv[2], ' vs. ', lv[1])
-      ) %>%
-      select(HCR_IDs, group, comparison, any_of(sig_phenos)) %>%
-      pivot_longer(any_of(sig_phenos), names_to = 'pheno', values_to = 'value')
-  }) %>%
-    filter(!is.na(value)) %>%
-    semi_join(sig_tb, by = c('comparison', 'pheno'))
-
-  #Sub-panel titles: native-unit phenotype label only
-  facet_tb <- sig_tb %>%
-    mutate(
-      facet_label = str_wrap(
-        map_chr(pheno, ~ param_list[[.x]][2]),
-        35
-      )
-    ) %>%
-    select(comparison, pheno, group1, group2, facet_label)
-
-  comps_present <- intersect(comporder, unique(sig_tb$comparison))
-
-  comp_plots <- map(comps_present, function(comp) {
-    comp_facets <- filter(facet_tb, comparison == comp)
-    g1 <- comp_facets$group1[1]
-    g2 <- comp_facets$group2[1]
-    comp_palette <- if (!is.null(palette[[comp]])) {
-      palette[[comp]]
-    } else {
-      default_palette
-    }
-    group_cols <- set_names(comp_palette, c(g1, g2))
-
-    comp_tb <- raw_long %>%
-      filter(comparison == comp) %>%
-      left_join(
-        select(comp_facets, comparison, pheno, facet_label),
-        by = c('comparison', 'pheno')
-      ) %>%
-      mutate(group = factor(group, levels = c(g1, g2)))
+  comp_plots <- map(prep$comps_present, function(comp) {
+    comp_data <- sig_comparison_data(prep, comp, palette, default_palette)
+    comp_tb <- comp_data$comp_tb
+    group_cols <- comp_data$group_cols
 
     median_tb <- comp_tb %>%
       group_by(facet_label, group) %>%
@@ -1534,29 +1571,154 @@ sig_density_plotter <- function(
   return(combined_plot)
 }
 
-#This combines the panelled summary scatter (top) with the raw phenotype histograms for significant findings (underneath)
-#into a single publication figure. Panels are tagged sequentially (A = summary scatter; B onwards = one row per comparison)
-combined_figure_plotter <- function(
+#This plots the raw (non-transformed) phenotype distributions as side-by-side violins (with inner boxplots) across both subgroups
+#for every significant comparison x phenotype finding; one row per comparison, one sub-panel per phenotype
+sig_violin_plotter <- function(
   summary_tb,
-  comparison_tbs_list,
+  comparison_tbs_list, #List of comparison tibbles each with a `group` factor (levels = c(group2, group1))
   param_list,
   output_path,
-  file_name = 'LinearRegression_summary_panelplot_with_histograms.png',
-  scatter_file_name = 'LinearRegression_summary_panelplot_fdr_legendright.png',
-  density_file_name = 'Significant_findings_raw_histogram_panelplot.png',
+  file_name = 'Significant_findings_raw_violin_panelplot.png',
   comporder = c(
     'Thick vs. Thin',
     'MYBPC3 vs. MYH7',
     'MYBPC3_pLOF vs. MYBPC3_nonLOF',
     'P/LP vs. VUS'
   ),
-  palette = NULL, #NULL uses sig_density_plotter()'s default per-comparison palette
+  mtc = 'fdr',
+  alpha = 0.05,
+  palette = list(
+    #Distinct (group1, group2) colour pair per comparison
+    'Thick vs. Thin' = c('#1B9E77', '#D95F02'),
+    'MYBPC3 vs. MYH7' = c('#7570B3', '#E6AB02'),
+    'MYBPC3_pLOF vs. MYBPC3_nonLOF' = c('#E7298A', '#66A61E'),
+    'P/LP vs. VUS' = c('#2166AC', '#B2182B')
+  ),
+  default_palette = c('grey30', 'grey70'),
+  show_points = FALSE, #Overlay jittered raw points (can be busy for large groups)
+  trim = TRUE, #TRUE trims violins to the observed data range
+  width = 12,
+  height = NULL
+) {
+  prep <- sig_findings_prepper(
+    summary_tb,
+    comparison_tbs_list,
+    param_list,
+    comporder,
+    mtc,
+    alpha
+  )
+
+  if (is.null(prep)) {
+    message(
+      'No significant findings at the chosen threshold; no violin plot produced.'
+    )
+    return(invisible(NULL))
+  }
+
+  comp_plots <- map(prep$comps_present, function(comp) {
+    comp_data <- sig_comparison_data(prep, comp, palette, default_palette)
+    comp_tb <- comp_data$comp_tb
+    group_cols <- comp_data$group_cols
+
+    ggplot(comp_tb, aes(x = group, y = value, fill = group, colour = group)) +
+      geom_violin(
+        alpha = 0.4,
+        linewidth = 0.4,
+        trim = trim,
+        scale = 'width' #Equal max width per group so groups of very different size remain comparable
+      ) +
+      {
+        if (isTRUE(show_points)) {
+          geom_jitter(width = 0.12, height = 0, size = 0.5, alpha = 0.3)
+        }
+      } +
+      geom_boxplot(
+        width = 0.15,
+        fill = 'white',
+        outlier.shape = NA,
+        linewidth = 0.5
+      ) + #Box centre line = median
+      facet_wrap(~facet_label, scales = 'free_y', nrow = 1) +
+      scale_fill_manual(values = group_cols) +
+      scale_colour_manual(values = group_cols) +
+      labs(
+        title = comp,
+        x = NULL,
+        y = 'Raw phenotype value',
+        fill = NULL,
+        colour = NULL
+      ) +
+      theme_classic(base_size = 12) +
+      theme(
+        plot.title = element_text(face = 'bold'),
+        strip.background = element_blank(), #Plain text phenotype label, no box
+        strip.text = element_text(size = 10, face = 'bold'),
+        panel.grid.minor = element_blank(),
+        legend.position = 'right'
+      )
+  })
+
+  combined_plot <- patchwork::wrap_plots(comp_plots, ncol = 1) +
+    patchwork::plot_annotation(tag_levels = 'A')
+
+  if (is.null(height)) {
+    height <- 3.8 * length(comp_plots)
+  }
+
+  ggsave(
+    file.path(output_path, file_name),
+    combined_plot,
+    width = width,
+    height = height,
+    dpi = 300
+  )
+
+  return(combined_plot)
+}
+
+#This combines the panelled summary scatter (top) with the raw phenotype distributions for significant findings (underneath)
+#into a single publication figure. Panels are tagged sequentially (A = summary scatter; B onwards = one row per comparison)
+#dist_type = 'histogram' uses sig_density_plotter() (overlapping histograms); 'violin' uses sig_violin_plotter()
+combined_figure_plotter <- function(
+  summary_tb,
+  comparison_tbs_list,
+  param_list,
+  output_path,
+  dist_type = c('histogram', 'violin'),
+  file_name = NULL, #NULL -> 'LinearRegression_summary_panelplot_with_<dist_type>s.png'
+  scatter_file_name = 'LinearRegression_summary_panelplot_fdr_legendright.png',
+  density_file_name = NULL, #NULL -> 'Significant_findings_raw_<dist_type>_panelplot.png'
+  comporder = c(
+    'Thick vs. Thin',
+    'MYBPC3 vs. MYH7',
+    'MYBPC3_pLOF vs. MYBPC3_nonLOF',
+    'P/LP vs. VUS'
+  ),
+  palette = NULL, #NULL uses the distribution plotter's default per-comparison palette
   mtc = 'fdr',
   alpha = 0.05,
   scatter_height = 8, #Height (in) allotted to the summary scatter
-  density_row_height = 3.8, #Height (in) allotted to each density row
-  width = 12
+  density_row_height = 3.8, #Height (in) allotted to each distribution row
+  width = 12,
+  ... #Passed to the distribution plotter (e.g. bins/hist_scale for histogram; show_points/trim for violin)
 ) {
+  dist_type <- match.arg(dist_type)
+  if (is.null(file_name)) {
+    file_name <- str_c(
+      'LinearRegression_summary_panelplot_with_',
+      dist_type,
+      's.png'
+    )
+  }
+  if (is.null(density_file_name)) {
+    density_file_name <- str_c(
+      'Significant_findings_raw_',
+      dist_type,
+      '_panelplot.png'
+    )
+  }
+
   #Summary scatter with legend on the right (saved under a separate name so the bottom-legend standalone PNG isn't overwritten)
   scatter_plot <- summary_panel_plotter(
     summary_tb,
@@ -1568,21 +1730,29 @@ combined_figure_plotter <- function(
     legend_position = 'right'
   )
 
-  #Histogram rows for significant findings (re-saves its own standalone PNG as a side effect)
-  density_args <- list(
-    summary_tb = summary_tb,
-    comparison_tbs_list = comparison_tbs_list,
-    param_list = param_list,
-    output_path = output_path,
-    file_name = density_file_name,
-    comporder = comporder,
-    mtc = mtc,
-    alpha = alpha
+  #Distribution rows for significant findings (re-saves its own standalone PNG as a side effect)
+  density_args <- c(
+    list(
+      summary_tb = summary_tb,
+      comparison_tbs_list = comparison_tbs_list,
+      param_list = param_list,
+      output_path = output_path,
+      file_name = density_file_name,
+      comporder = comporder,
+      mtc = mtc,
+      alpha = alpha
+    ),
+    list(...)
   )
   if (!is.null(palette)) {
     density_args$palette <- palette
   }
-  density_plot <- do.call(sig_density_plotter, density_args)
+  dist_plotter <- switch(
+    dist_type,
+    histogram = sig_density_plotter,
+    violin = sig_violin_plotter
+  )
+  density_plot <- do.call(dist_plotter, density_args)
 
   if (is.null(density_plot)) {
     message(
@@ -1598,7 +1768,7 @@ combined_figure_plotter <- function(
     return(scatter_plot)
   }
 
-  #Number of histogram rows = number of comparisons (in comporder) with >=1 significant finding (same MTC as the plotters)
+  #Number of distribution rows = number of comparisons (in comporder) with >=1 significant finding (same MTC as the plotters)
   n_density_rows <- summary_tb %>%
     mutate(adj_p = p.adjust(pval, method = mtc)) %>%
     filter(adj_p < alpha) %>%
@@ -1607,7 +1777,7 @@ combined_figure_plotter <- function(
     distinct(comparison) %>%
     nrow()
 
-  #Nested patchwork tags continue sequentially: A = scatter, B.. = histogram rows
+  #Nested patchwork tags continue sequentially: A = scatter, B.. = distribution rows
   combined_plot <- patchwork::wrap_plots(
     scatter_plot,
     density_plot,
