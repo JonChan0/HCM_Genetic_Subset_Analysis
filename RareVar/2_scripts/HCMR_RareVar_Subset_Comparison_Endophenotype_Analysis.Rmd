@@ -73,7 +73,7 @@ label_tb <- read_tsv('output/data/combo_labels_20260123.tsv')
 
 ```{r phenotype_tb}
 
-print(str_glue('Filtering out {nrow(hcmr_tb) - nrow(hcmr_tb %>% filter(sarcomere==T))} sarcomere-negative individuals from HCMR cohort for analysis.'))
+print(str_glue('Filtering to {nrow(hcmr_tb %>% filter(sarcomere==T))} sarcomere-positive individuals from HCMR cohort for analysis.'))
 
 hcmr_sarcpos_tb <- hcmr_tb %>%
   filter(sarcomere==T) #Filter to only sarcomere-positive individuals
