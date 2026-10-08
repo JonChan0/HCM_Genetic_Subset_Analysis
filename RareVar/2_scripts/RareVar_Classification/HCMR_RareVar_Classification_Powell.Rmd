@@ -47,13 +47,13 @@ vep_csq_colnames <- "Allele|Consequence|IMPACT|SYMBOL|Gene_ID|Feature_type|Featu
   str_split('\\|') %>%
   unlist()
 
-#Define function to read in an individual-level VEP .vcf and return the Powell SARC+ variants carried (dosage > 0)
-powell_vcf_extractor <- function(filepath){
+#Define function to read in an individual-level VEP .vcf and return the Powell variants in vars_tb (default = SARC+ only) carried (dosage > 0)
+powell_vcf_extractor <- function(filepath, vars_tb = powell_sarcpos_vars){
   vcf <- vroom::vroom(filepath, delim='\t', comment='##', col_types=cols(.default='c'), altrep=TRUE, progress=FALSE) #altrep = lazy so INFO only materialised for matched rows
   hcr_id <- colnames(vcf)[10]
 
   #Match on CHROM:POS:REF:ALT (removing chr prefix to match Powell's VariantID). Assumes biallelic records as per hcmr_rarevar_classifier.R
-  keep <- str_c(str_remove(vcf[[1]], '^chr'), vcf$POS, vcf$REF, vcf$ALT, sep=':') %in% powell_sarcpos_vars$VariantID
+  keep <- str_c(str_remove(vcf[[1]], '^chr'), vcf$POS, vcf$REF, vcf$ALT, sep=':') %in% vars_tb$VariantID
   if (!any(keep)){
     return(NULL)
   }
@@ -68,7 +68,7 @@ powell_vcf_extractor <- function(filepath){
                               T ~ 0),
            HCR_ID = hcr_id) %>%
     filter(dosage != 0) %>%
-    left_join(powell_sarcpos_vars, by='VariantID') %>%
+    left_join(vars_tb, by='VariantID') %>%
     mutate(CSQ = str_extract(INFO, '(?<=CSQ=)[^;]+')) %>%
     separate_rows(CSQ, sep=',') %>%
     separate(CSQ, into=vep_csq_colnames, sep='\\|', fill='right', extra='drop') %>%
@@ -128,9 +128,61 @@ classified_hcrids <- read_tsv('genetic_subset_analysis/RareVar/3_output/data/hcm
 print(str_c(sum(classified_hcrids_powell$HCR_ID %in% classified_hcrids$HCR_ID), ' of these are also sarcomere-positive per KT; ',
             sum(!classified_hcrids$HCR_ID %in% classified_hcrids_powell$HCR_ID), ' KT sarcomere-positive HCR IDs are not SARC+ per Powell'))
 
-rm(powell_sarcpos_vars, vep_csq_colnames, vep_filepaths, powell_max_vars, powell_bins)
+rm(powell_sarcpos_vars, powell_max_vars, powell_bins) #vep_csq_colnames and vep_filepaths kept for the full-cohort section below
 
 write_tsv(all_merged_overlapvars_tb_powell, 'genetic_subset_analysis/RareVar/3_output/individual_class/overlap_variants/hcmr_powell_overlapvariants.tsv')
 write_tsv(classified_hcrids_powell, 'genetic_subset_analysis/RareVar/3_output/data/hcmr_rarevar_class_powell.tsv')
+```
+
+# Full-Cohort Powell SARC Labels
+
+This outputs one row per HCMR individual (all HCR IDs in total_df_notransform_nogenofilter) with every Powell-listed variant they carry (any SARC_variant_class) and an individual-level SARC label, assigned by priority:
+
+1) SARC+ = carries >=1 Powell 'SARC+' variant
+2) SARC- (inclusive) = no SARC+ variant but carries >=1 Powell 'SARC- (inclusive)' variant
+3) SARC- (strict) = otherwise (i.e. only 'SARC- (strict)' variants or no Powell-listed variant at all)
+4) NA = no individual VEP .vcf (i.e. no rare variant data)
+
+```{r powell_full_cohort_labels}
+powell_all_vars <- powell_variant_status %>%
+  select(VariantID, Gene = SYMBOL, Transcript = Feature, Curation = SARC_variant_class)
+
+powell_allvars_long <- map(vep_filepaths, powell_vcf_extractor, vars_tb = powell_all_vars, .progress=TRUE) %>%
+  bind_rows() %>%
+  filter(HCR_ID %in% total_df_notransform_nogenofilter$HCR_IDs) %>%
+  distinct(HCR_ID, VariantID, .keep_all=TRUE) #In case an individual has a .vcf in both individual_vep/ and individual_vep/sarcneg/
+
+#HCR IDs with rare variant data (VEP .vcf filenames are {HCR_ID}.vcf)
+hcrids_with_vcf <- unique(str_remove(basename(vep_filepaths), '\\.vcf$'))
+
+#Individual-level SARC label by priority
+powell_sarc_labels <- powell_allvars_long %>%
+  group_by(HCR_ID) %>%
+  summarise(SARC_label = case_when(any(Curation == 'SARC+') ~ 'SARC+',
+                                   any(Curation == 'SARC- (inclusive)') ~ 'SARC- (inclusive)',
+                                   T ~ 'SARC- (strict)'),
+            .groups='drop')
+
+#One row per individual with Variant1; Variant2 etc. (SARC+ variants listed first)
+powell_variants_wide <- powell_allvars_long %>%
+  arrange(HCR_ID, factor(Curation, levels=c('SARC+', 'SARC- (inclusive)', 'SARC- (strict)'))) %>%
+  group_by(HCR_ID) %>%
+  mutate(variant_number = row_number()) %>%
+  ungroup() %>%
+  select(HCR_ID, variant_number, Variant) %>%
+  pivot_wider(names_from = variant_number, names_prefix = 'Variant', values_from = Variant)
+
+hcmr_powell_sarc_labels_full <- tibble(HCR_ID = unique(total_df_notransform_nogenofilter$HCR_IDs)) %>%
+  left_join(powell_variants_wide, by='HCR_ID') %>%
+  left_join(powell_sarc_labels, by='HCR_ID') %>%
+  mutate(SARC_label = case_when(!HCR_ID %in% hcrids_with_vcf ~ NA_character_,
+                                is.na(SARC_label) ~ 'SARC- (strict)', #Has rare variant data but carries no Powell-listed variant
+                                T ~ SARC_label))
+
+print(count(hcmr_powell_sarc_labels_full, SARC_label))
+
+rm(powell_all_vars, powell_allvars_long, hcrids_with_vcf, powell_sarc_labels, powell_variants_wide, vep_csq_colnames, vep_filepaths)
+
+write_tsv(hcmr_powell_sarc_labels_full, 'genetic_subset_analysis/RareVar/3_output/data/hcmr_powell_sarc_labels_full.tsv')
 ```
 
