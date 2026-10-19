@@ -589,20 +589,20 @@ summary_plotter <- function(
     height = if (isTRUE(poster)) 12 else height
   )
 
-  ggsave(
-    filename = stringr::str_c(
-      output_path,
-      test,
-      "_summary_plot_",
-      if (using_adj_p) "adj_p" else mtc,
-      append,
-      ".tiff"
-    ),
-    plot = summary_cont_plot,
-    dpi = 600,
-    width = width,
-    height = if (isTRUE(poster)) 12 else height
-  )
+  # ggsave(
+  #   filename = stringr::str_c(
+  #     output_path,
+  #     test,
+  #     "_summary_plot_",
+  #     if (using_adj_p) "adj_p" else mtc,
+  #     append,
+  #     ".tiff"
+  #   ),
+  #   plot = summary_cont_plot,
+  #   dpi = 600,
+  #   width = width,
+  #   height = if (isTRUE(poster)) 12 else height
+  # )
 
   invisible(summary_cont_plot)
 }
@@ -1279,7 +1279,11 @@ summary_panel_plotter <- function(
     aes(x = estimate, y = -log10(adj_p), colour = pheno_short)
   ) +
     geom_vline(xintercept = 0, linetype = 'dashed', colour = 'grey50') +
-    geom_hline(yintercept = -log10(alpha), linetype = 'dotted', colour = 'red') +
+    geom_hline(
+      yintercept = -log10(alpha),
+      linetype = 'dotted',
+      colour = 'red'
+    ) +
     {
       if (isTRUE(confint)) {
         geom_linerange(

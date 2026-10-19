@@ -42,7 +42,14 @@ write_rds(total_df_notransform, 'output/data/total_notransform_df_2446_sarcchang
 rm(hcmr_ids)
 
 #Add in the HCMR PRS scores (this is with the minimac-r2-filter for INFO 0.3-1.0) and computed with the intersectvars with UKB
-hcmr_prs <- read_tsv('genetic_subset_analysis/PRS/1_input/hcmr_imputedvars_prs.sscore') #2674 individuals with PRS
+# hcmr_prs <- read_tsv('genetic_subset_analysis/PRS/1_input/hcmr_imputedvars_prs.sscore') #2674 individuals with PRS
+
+#Add in the HCMR PRS scores derived from pgscalc with ancestry normalisation (method 2)
+hcmr_prs <- read_tsv('genetic_subset_analysis/PRS/1_input/hcmr_pgs.txt.gz') %>%
+  filter(PGS == 'HCM_PRSCS_nohcmr') %>%
+  filter(sampleset == 'hcmr') %>%
+  dplyr::rename('cv_prs'='Z_norm2') #Normalised within HCMR with method 2
+
 
 # Add in the HCMR PCs which were derived from flashPCA2 from the HCMR hard-called genotypes
 hcmr_pcs <- read_delim('popgen/2_gwas/data/hcmr/HCMR_HARDCALLS/pcs_hcmr_10pcs')
@@ -90,11 +97,11 @@ dist_plotter(total_df_notransform, phenos_of_interest)
 This preprocesses + filters the data within the sarcomere-positive and sarcomere-negative individuals.
 
 ```{r}
-data_preprocessor <- function(total_df_notransform, hcmr_prs, phenos_of_interest, sarcomere_status=c(T,F), prs_scale=T, hcmr_pcs=NULL){
+data_preprocessor <- function(total_df_notransform, hcmr_prs, phenos_of_interest, sarcomere_status=c(T,F), prs_scale=F, hcmr_pcs=NULL){
 
   output_tb <- total_df_notransform %>%
     filter(sarcomere %in% sarcomere_status) %>% 
-    left_join(select(hcmr_prs, HCR_IDs=IID, cv_prs=SCORE1_AVG)) 
+    left_join(select(hcmr_prs, HCR_IDs=IID, cv_prs)) 
 
   if(isTRUE(prs_scale)){
     #Scale the PRS within the sarcomere-positive individuals
@@ -261,11 +268,11 @@ This plots a forest plot for the significant associations with both the PRS and 
 ```{r}
 #This uses allcomer_lm[[2]] to select the significant associations for both cv_prs and sarcomere predictors and then plots the forest plot from allcomer_lm (with */**/*** to indicate adjusted p-value) and uses the allcomer_lm[[1]] to construct the aligned data table
 
-forest_plot_with_aligned_table(
-  lm_results_scaled   = allcomer_lm[[2]],
-  lm_results_unscaled = allcomer_lm[[1]],
-  output_dir = "genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/"
-)
+# forest_plot_with_aligned_table(
+#   lm_results_scaled   = allcomer_lm[[2]],
+#   lm_results_unscaled = allcomer_lm[[1]],
+#   output_dir = "genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/"
+# )
 ```
 
 ```{r}

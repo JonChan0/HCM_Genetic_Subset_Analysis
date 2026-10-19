@@ -25,3 +25,4 @@ RareVar/2_scripts/RareVar_Classification/HCMR_RareVar_Classification.Rmd
 *.html
 *.tiff
 *.pdf
+*.txt.gz

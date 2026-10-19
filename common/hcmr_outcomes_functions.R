@@ -6,9 +6,11 @@ data_preprocessor <- function(
   prs_scale = T,
   hcmr_pcs = NULL,
   log_transform_vars = NULL,
-  hcmr_rarevar_class = NULL
+  hcmr_rarevar_class = NULL,
+  prs_score_col = 'cv_prs' #Column in each PRS tibble holding the score (e.g. 'SCORE1_AVG' for plink .sscore, 'cv_prs' for pgscalc Z_norm2)
 ) {
-  output_tb <- outcomes_df
+  output_tb <- outcomes_df %>%
+    filter(sarcomere %in% sarcomere_status)
 
   if (!is.null(hcmr_prs)) {
     # expects a named list of PRS tibbles
@@ -28,7 +30,11 @@ data_preprocessor <- function(
 
       output_tb <- output_tb |>
         left_join(
-          dplyr::select(prs_tb, HCR_IDs = IID, !!prs_name := SCORE1_AVG),
+          dplyr::select(
+            prs_tb,
+            HCR_IDs = IID,
+            !!prs_name := all_of(prs_score_col)
+          ),
           by = "HCR_IDs"
         )
 

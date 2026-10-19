@@ -54,7 +54,13 @@ total_df_notransform <- total_df_notransform %>%
 rm(hcmr_ids)
 
 #Add in the HCMR PRS scores (this is with the minimac-r2-filter for INFO 0.3-1.0) and computed with the intersectvars with UKB
-hcmr_prs <- read_tsv('genetic_subset_analysis/PRS/1_input/hcmr_imputedvars_prs.sscore')
+# hcmr_prs <- read_tsv('genetic_subset_analysis/PRS/1_input/hcmr_imputedvars_prs.sscore')
+
+#Add in the HCMR PRS scores derived from pgscalc with ancestry normalisation (method 2)
+hcmr_prs <- read_tsv('genetic_subset_analysis/PRS/1_input/hcmr_pgs.txt.gz') %>%
+  filter(PGS == 'HCM_PRSCS_nohcmr') %>%
+  filter(sampleset == 'hcmr') %>%
+  dplyr::rename('cv_prs'='Z_norm2') #Normalised within HCMR with method 2
 
 # Add in the HCMR PCs which were derived from flashPCA2 from the HCMR hard-called genotypes
 hcmr_pcs <- read_delim('popgen/2_gwas/data/hcmr/HCMR_HARDCALLS/pcs_hcmr_10pcs')
@@ -489,10 +495,10 @@ This filters to the analysed cohort, joins the PRS (scaled per-SD) and PCs, and 
 `cmrdiabp` is kept on its original name and relabelled to DBP only in the figures (avoiding a rename-before-select ordering issue).
 
 ```{r}
-data_preprocessor <- function(total_df, hcmr_prs, vars_keep, sarcomere_status=c(T,F), prs_scale=TRUE, hcmr_pcs=NULL){
+data_preprocessor <- function(total_df, hcmr_prs, vars_keep, sarcomere_status=c(T,F), prs_scale=FALSE, hcmr_pcs=NULL){
   out <- total_df %>%
     filter(sarcomere %in% sarcomere_status) %>%
-    left_join(select(hcmr_prs, HCR_IDs=IID, cv_prs=SCORE1_AVG), by='HCR_IDs')
+    left_join(select(hcmr_prs, HCR_IDs=IID, cv_prs), by='HCR_IDs')
 
   if(isTRUE(prs_scale)){
     out <- mutate(out, cv_prs = scale(cv_prs)[,1])

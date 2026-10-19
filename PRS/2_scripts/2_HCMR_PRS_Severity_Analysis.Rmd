@@ -35,7 +35,13 @@ af_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_af_ou
 stroke_outcomes_df <- readRDS('genetic_subset_analysis/common/output/data/hcmr_stroke_outcome_df_2445.rds')
 
 #Add in the HCMR PRS scores (this is with the minimac-r2-filter for INFO 0.3-1.0) and computed with the intersectvars with UKB
-hcmr_prs <- read_tsv('genetic_subset_analysis/PRS/1_input/hcmr_imputedvars_prs.sscore')
+# hcmr_prs <- read_tsv('genetic_subset_analysis/PRS/1_input/hcmr_imputedvars_prs.sscore')
+
+#Add in the HCMR PRS scores derived from pgscalc with ancestry normalisation (method 2)
+hcmr_prs <- read_tsv('genetic_subset_analysis/PRS/1_input/hcmr_pgs.txt.gz') %>%
+  filter(PGS == 'HCM_PRSCS_nohcmr') %>%
+  filter(sampleset == 'hcmr') %>%
+  dplyr::rename('cv_prs'='Z_norm2') #Normalised within HCMR with method 2
 
 hcmr_pcs <- read_delim('popgen/2_gwas/data/hcmr/HCMR_HARDCALLS/pcs_hcmr_10pcs')
 
@@ -57,11 +63,22 @@ outcome_vars <- c('hcmdt','event','event_date','event_indicator','event_or_censo
 
 This preprocesses + filters the data to all-comer or the subgroups of sarcomere-positive and sarcomere-negative individuals.
 ```{r}
-sarcall <- map(list(primary_outcomes_df, secondary_outcomes_df, hf_outcomes_df, va_outcomes_df, af_outcomes_df, stroke_outcomes_df), ~ data_preprocessor(.,  hcmr_rarevar_class, c(covars, outcome_vars), sarcomere_status=c(T,F), hcmr_pcs=hcmr_pcs, hcmr_prs=hcmr_prs))
-sarcpos <- map(list(primary_outcomes_df, secondary_outcomes_df, hf_outcomes_df, va_outcomes_df, af_outcomes_df, stroke_outcomes_df), ~ data_preprocessor(., hcmr_rarevar_class, c(covars, outcome_vars), sarcomere_status=T, hcmr_pcs=hcmr_pcs, hcmr_prs=hcmr_prs))
-sarcneg <- map(list(primary_outcomes_df, secondary_outcomes_df, hf_outcomes_df, va_outcomes_df, af_outcomes_df, stroke_outcomes_df), ~ data_preprocessor(.,  hcmr_rarevar_class, c(covars, outcome_vars), sarcomere_status=F, hcmr_pcs=hcmr_pcs, hcmr_prs=hcmr_prs))
+#PRS is passed as a named list (name = output column) and is already normalised (Z_norm2) so it is not rescaled
+sarcall <- map(list(primary_outcomes_df, secondary_outcomes_df, hf_outcomes_df, va_outcomes_df, af_outcomes_df, stroke_outcomes_df), ~ data_preprocessor(., c(covars, outcome_vars), hcmr_prs=list(cv_prs=hcmr_prs), sarcomere_status=c(T,F), prs_scale=F, hcmr_pcs=hcmr_pcs, hcmr_rarevar_class=hcmr_rarevar_class, prs_score_col='cv_prs'))
+sarcpos <- map(list(primary_outcomes_df, secondary_outcomes_df, hf_outcomes_df, va_outcomes_df, af_outcomes_df, stroke_outcomes_df), ~ data_preprocessor(., c(covars, outcome_vars), hcmr_prs=list(cv_prs=hcmr_prs), sarcomere_status=T, prs_scale=F, hcmr_pcs=hcmr_pcs, hcmr_rarevar_class=hcmr_rarevar_class, prs_score_col='cv_prs'))
+sarcneg <- map(list(primary_outcomes_df, secondary_outcomes_df, hf_outcomes_df, va_outcomes_df, af_outcomes_df, stroke_outcomes_df), ~ data_preprocessor(., c(covars, outcome_vars), hcmr_prs=list(cv_prs=hcmr_prs), sarcomere_status=F, prs_scale=F, hcmr_pcs=hcmr_pcs, hcmr_rarevar_class=hcmr_rarevar_class, prs_score_col='cv_prs'))
 
 rm(primary_outcomes_df, secondary_outcomes_df, hcmr_prs, hcmr_rarevar_class)
+
+#Set Sarcomere-negative as the reference level for sarcomere_binned (as.factor would otherwise make P_LP the reference alphabetically)
+#Only levels present in each dataset are kept so subgroups (e.g. sarcpos) have no empty levels
+sarcomere_binned_leveller <- function(df){
+  df %>%
+    mutate(sarcomere_binned = factor(sarcomere_binned, levels = intersect(c('Sarcomere-negative','P_LP','VUS'), unique(sarcomere_binned))))
+}
+sarcall <- map(sarcall, sarcomere_binned_leveller)
+sarcpos <- map(sarcpos, sarcomere_binned_leveller)
+sarcneg <- map(sarcneg, sarcomere_binned_leveller)
 
 #Check for unique values of sarcomere_binned
 map(sarcall, ~ unique(.x$sarcomere_binned))
@@ -761,30 +778,25 @@ This looks for association between alternative PRSs (not the HCM risk/susceptibi
 This is based on Yang et al, 2025 which showed that risk PRS did not associate with disease-specific mortality but a PRS that was trained in the general population to model the common genetic risk of the outcomes directly performed better.
 
 ```{r}
-alt_prs <- map(list.files('genetic_subset_analysis/PRS/3_output/alt_prs/3_hcmr_scores/', pattern='sscore', full.names=T), ~read_tsv(.) %>% select(HCR_IDs = IID, SCORE1_AVG) %>% dplyr::rename(cv_prs = SCORE1_AVG))
-names(alt_prs) <- str_match(basename(list.files('genetic_subset_analysis/PRS/3_output/alt_prs/3_hcmr_scores/', pattern='sscore', full.names=T)), '([^_]+)\\.sscore$')[,2]
+# alt_prs <- map(list.files('genetic_subset_analysis/PRS/3_output/alt_prs/3_hcmr_scores/', pattern='sscore', full.names=T), ~read_tsv(.) %>% select(HCR_IDs = IID, SCORE1_AVG) %>% dplyr::rename(cv_prs = SCORE1_AVG))
+# names(alt_prs) <- str_match(basename(list.files('genetic_subset_analysis/PRS/3_output/alt_prs/3_hcmr_scores/', pattern='sscore', full.names=T)), '([^_]+)\\.sscore$')[,2]
+
+#Add in the alternate PRS scores derived from pgscalc with ancestry normalisation (method 2) as one column per PRS (cv_prs_<alt_prs_name>)
+#The VA PRS is not available from pgscalc so is not included
+merged_alt_prs <- read_tsv('genetic_subset_analysis/PRS/1_input/hcmr_pgs.txt.gz') %>%
+  filter(PGS %in% c('af','cardiac_arrest','hf','stroke')) %>%
+  mutate(PGS = recode(PGS, 'cardiac_arrest' = 'arrest')) %>% #Keep the short name used for the downstream term labels
+  select(HCR_IDs = IID, PGS, Z_norm2) %>% #Normalised within HCMR with method 2
+  pivot_wider(names_from = PGS, values_from = Z_norm2, names_prefix = 'cv_prs_')
 
 #Define the PRS of interest
-altprs_of_interest <- str_c('cv_prs_',names(alt_prs))
-
-#Rename the columns to be cv_prs_<alt_prs_name>
-alt_prs <- map2(
-  alt_prs,
-  names(alt_prs),
-  ~ .x |> rename(!!str_c("cv_prs_", .y) := cv_prs)
-)
-
-#Join each of the alt_prs to each of the sarcall datasets
-merged_alt_prs <- reduce(alt_prs, function(acc, prs_df) {
-    left_join(acc, prs_df, by = "HCR_IDs")
-  })
-rm(alt_prs)
+altprs_of_interest <- setdiff(names(merged_alt_prs), 'HCR_IDs')
 
 #Join the merged_alt_prs to each of the sarcall datasets
 sarcall_altprs <- map(sarcall, ~ left_join(.x, merged_alt_prs, by='HCR_IDs'))
 
-#Scale each of the alt_prs columns within the sarcall datasets
-sarcall_altprs <- map(sarcall_altprs, ~ .x |> mutate(across(starts_with("cv_prs_"), ~scale(.)[,1])))
+#No rescaling of the alt_prs columns since Z_norm2 is already normalised (as for the HCM PRS)
+# sarcall_altprs <- map(sarcall_altprs, ~ .x |> mutate(across(starts_with("cv_prs_"), ~scale(.)[,1])))
 names(sarcall_altprs) <- c('primary','secondary','hf','va','af','stroke')
 
 rm(merged_alt_prs)
@@ -916,8 +928,8 @@ sarcall_cox_agetimescale_altprs_strokecomp <- cox_function(sarcall_altprs[['stro
              suffix='stroke'
              ) 
 
-#VA/CardArrest PRS x VA composite which VA needs tt(sex)
-sarcall_cox_agetimescale_altprs_vacomp <- map(c('cv_prs_arrest','cv_prs_va'), ~ cox_function(sarcall_altprs[['va']], 
+#CardArrest PRS x VA composite which VA needs tt(sex) (VA PRS not available from pgscalc)
+sarcall_cox_agetimescale_altprs_vacomp <- map(c('cv_prs_arrest'), ~ cox_function(sarcall_altprs[['va']], 
              predictor_name=.,
              predictor_type='continuous',
              covars=c(covars,'sarcomere'), #No age because it is used as timescale
