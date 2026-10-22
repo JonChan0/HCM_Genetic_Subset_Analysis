@@ -155,7 +155,7 @@ This looks for association between PRS and CMR endophenotypes:
 This tests for association between the continuous PRS and the various continuous endophenotypes. 
 It applies rank-based inverse normalisation to all of the continuous endophenotypes to enable comparison in a summary plot. 
 
-It uses age,sex and 5PCs for the PRS-based analysis.
+It uses age,sex and 10PCs for the PRS-based analysis.
 
 ```{r}
 lm_runner <- function(input_tb, phenos_of_interest, continuous_param_list, output_path, predictor_name = 'cv_prs', predictor_type='continuous',covars = c('age','sex'), label_tb_path='output/data/combo_labels_20260123.tsv', scaler = 'log',scaled_cols = c('lge_total'), additional_predictors_to_report = NULL, summary_plot=T){
@@ -249,7 +249,7 @@ lm_runner <- function(input_tb, phenos_of_interest, continuous_param_list, outpu
 ```{r}
 #Run the association analysis with LM between continuous PRS and endophenotypes
 #Allcomer analyses
-allcomer_lm <- lm_runner(sarcall,phenos_of_interest, continuous_param_list, output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/', covars=c('age','sex','bmi','sarcomere','PC1','PC2','PC3','PC4','PC5'), additional_predictors_to_report=c('sarcomere'), summary_plot=F)#i.e. after standard scaling
+allcomer_lm <- lm_runner(sarcall,phenos_of_interest, continuous_param_list, output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/', covars=c('age','sex','bmi','sarcomere','PC1','PC2','PC3','PC4','PC5','PC6','PC7','PC8','PC9','PC10'), additional_predictors_to_report=c('sarcomere'), summary_plot=F)#i.e. after standard scaling
 
 #This is a custom plot because I want to adjust the p-values of the sarcomere + cv_prs together but plot on 2 different plots
 allcomer_lm[[2]]  <- allcomer_lm[[2]]  %>%
@@ -259,8 +259,8 @@ summary_plotter(filter(allcomer_lm[[2]] ,predictor_reported=='cv_prs'), output_p
 summary_plotter(filter(allcomer_lm[[2]] ,predictor_reported=='sarcomere'), output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/', confint=T, label=T, test='LM', pval_col='adj_p', suffix='_sarcomere_only')
 
 #Run and plot subgroup analyses
-sarcpos_lm <- lm_runner(sarcpos,phenos_of_interest, continuous_param_list, output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcpos/', covars=c('age','sex','bmi','PC1','PC2','PC3','PC4','PC5'))
-sarcneg_lm <- lm_runner(sarcneg,phenos_of_interest, continuous_param_list, output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcneg/', covars=c('age','sex','bmi','PC1','PC2','PC3','PC4','PC5'))
+sarcpos_lm <- lm_runner(sarcpos,phenos_of_interest, continuous_param_list, output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcpos/', covars=c('age','sex','bmi','PC1','PC2','PC3','PC4','PC5','PC6','PC7','PC8','PC9','PC10'))
+sarcneg_lm <- lm_runner(sarcneg,phenos_of_interest, continuous_param_list, output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcneg/', covars=c('age','sex','bmi','PC1','PC2','PC3','PC4','PC5','PC6','PC7','PC8','PC9','PC10'))
 ```
 
 This plots a forest plot for the significant associations with both the PRS and the sarcomere status predictors (separated by facetted plot) with an aligned data table which shows the non-standardised beta values with their 95% confidence intervals for each significant PRS or sarcomere x endophenotype association.
@@ -287,7 +287,7 @@ sarcall_binned <- sarcall %>%
   mutate(group = factor(group, levels=c('Low PRS','Intermediate PRS','High PRS'))) %>%
   filter(!is.na(group))
 
-endophenotype_lm_results_binned <- lm_runner(sarcall_binned,phenos_of_interest, continuous_param_list, output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/binned/', predictor_name='group', predictor_type='group', covars=c('age','sex','bmi','sarcomere','PC1','PC2','PC3','PC4','PC5')) #This one does not report sarcomere as an additional predictor so does not plot those points
+endophenotype_lm_results_binned <- lm_runner(sarcall_binned,phenos_of_interest, continuous_param_list, output_path='genetic_subset_analysis/PRS/3_output/1_Endophenotype/2_LM/sarcall/binned/', predictor_name='group', predictor_type='group', covars=c('age','sex','bmi','sarcomere','PC1','PC2','PC3','PC4','PC5','PC6','PC7','PC8','PC9','PC10')) #This one does not report sarcomere as an additional predictor so does not plot those points
 ```
 
 

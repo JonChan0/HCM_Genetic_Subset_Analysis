@@ -91,7 +91,7 @@ proteins <- names(protein_labels)
 cont_predictors <- c('bmi','cmrdiabp')
 binary_crfs     <- setdiff(crfs, cont_predictors) #prior-history + smoking 0/1 flags, left on the native scale (hxafib/hxvt/smoking recoded to 0/1 in preprocessing)
 
-#Predictors reported in the figures (everything except age/sex/5PCs/BSA)
+#Predictors reported in the figures (everything except age/sex/10PCs/BSA)
 extra_predictors <- c('sarcomere', crfs, proteins)        #reported alongside cv_prs
 reported_predictors <- c('cv_prs', extra_predictors)
 
@@ -638,11 +638,11 @@ sarcall_scaled %>%
 # Joint Linear Regression
 
 For each endophenotype this fits the joint model
-`pheno ~ age + sex + 5PCs (+ BSA for wall thickness) + cv_prs + sarcomere + CRFs + plasma proteins`.
+`pheno ~ age + sex + 10PCs (+ BSA for wall thickness) + cv_prs + sarcomere + CRFs + plasma proteins`.
 `linear_logistic_regression_modeller` reports the PRS plus every additional predictor from this single mutually-adjusted fit, so all effects are conditional on one another.
 
 ```{r}
-adjust_covars  <- c('age','sex','FieldStrength','PC1','PC2','PC3','PC4','PC5')        #not reported; BSA auto-added for wallthkmax
+adjust_covars  <- c('age','sex','FieldStrength','PC1','PC2','PC3','PC4','PC5','PC6','PC7','PC8','PC9','PC10')        #not reported; BSA auto-added for wallthkmax
 model_covars   <- c(adjust_covars, extra_predictors)       #full RHS (minus the main predictor cv_prs)
 
 joint_lm <- map(continuous_param_list, ~ linear_logistic_regression_modeller(
